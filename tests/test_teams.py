@@ -52,7 +52,8 @@ def test_three_course_rosters_preserve_roles_and_lead(tmp_path, directory, lead_
         return LeadDecision(role_id=lead_role, reason="Coordinates the team's work")
 
     sandbox = Sandbox()
-    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap)) as client:
+    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token', bootstrap=bootstrap)) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         roster = sample(directory)
         response = client.post("/v1/teams", json={"request_id": "create-1", "roster": roster})
         assert response.status_code == 201, response.text
@@ -102,7 +103,8 @@ def test_fallback_lead_replay_and_team_isolation(tmp_path):
         f"## Specialist {i} (specialist_{i})\n\n```text\nInvestigate subject {i}.\n```"
         for i in range(3)
     )
-    with TestClient(create_app(model=model, sandbox=sandbox, state_dir=tmp_path)) as client:
+    with TestClient(create_app(model=model, sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token')) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         payload = {"request_id": "one", "name": "Research", "roster": roster}
         first = client.post("/v1/teams", json=payload)
         assert first.status_code == 201, first.text
@@ -137,7 +139,8 @@ def test_member_preparation_failure_retry_and_revision_conflicts(tmp_path):
         return LeadDecision(role_id="lead", reason="Coordinates")
 
     sandbox = Sandbox()
-    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap)) as client:
+    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token', bootstrap=bootstrap)) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         created = client.post("/v1/teams", json={"request_id": "create", "roster": sample(SAMPLES[0][0])})
         assert created.status_code == 201, created.text
         team = created.json()
@@ -168,7 +171,8 @@ def test_bad_roster_reports_line(tmp_path):
     async def bootstrap(roles):
         raise AssertionError("invalid roster must not reach bootstrap")
 
-    with TestClient(create_app(model=Model(), sandbox=Sandbox(), state_dir=tmp_path, bootstrap=bootstrap)) as client:
+    with TestClient(create_app(model=Model(), sandbox=Sandbox(), state_dir=tmp_path, operator_token='test-operator-token', bootstrap=bootstrap)) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         response = client.post("/v1/teams", json={"request_id": "bad", "roster": "## Broken (bad)\n\nNo fenced prompt here."})
         assert response.status_code == 422
         assert "line" in str(response.json()["detail"]).lower()
@@ -186,7 +190,8 @@ def test_concurrent_import_reuses_the_same_job(tmp_path):
 
     sandbox = Sandbox()
     payload = {"request_id": "same", "roster": sample(SAMPLES[0][0])}
-    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap)) as client:
+    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token', bootstrap=bootstrap)) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         with ThreadPoolExecutor(max_workers=2) as workers:
             first = workers.submit(client.post, "/v1/teams", json=payload)
             try:
@@ -213,10 +218,12 @@ def test_failed_initial_preparation_resumes_after_restart(tmp_path):
     sandbox = Sandbox()
     sandbox.fail_next = True
     payload = {"request_id": "restart", "roster": sample(SAMPLES[0][0])}
-    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap)) as client:
+    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token', bootstrap=bootstrap)) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         assert client.post("/v1/teams", json=payload).status_code == 503
     failed_workspace = sandbox.prepared[0]
-    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap)) as client:
+    with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token', bootstrap=bootstrap)) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         result = client.post("/v1/teams", json=payload)
         assert result.status_code == 201, result.text
         assert len(decisions) == 1

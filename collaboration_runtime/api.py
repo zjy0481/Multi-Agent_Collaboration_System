@@ -6,13 +6,18 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.sse import EventSourceResponse, ServerSentEvent
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from typing import Annotated
 
 from .artifacts import ArtifactError, ArtifactNotFound
+from .collaboration import CollaborationForbidden, CollaborationInvalid, CollaborationService, GoalInput, MessageInput
+from .local_auth import LocalAuth, Principal, SESSION_COOKIE, operator_credential
 from .model import CourseModel
 from .roles import ROLE_ID_PATTERN, RoleDefinition, RoleFileError
 from .runtime import ROLES, Runtime, TurnConflict
@@ -23,6 +28,7 @@ from .workspace import WorkspaceNotFound, WorkspaceService
 
 RequestId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 DisplayName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+STATIC = Path(__file__).with_name("static")
 
 
 class TurnInput(BaseModel):
@@ -33,6 +39,10 @@ class TeamInput(BaseModel):
     request_id: RequestId
     roster: Annotated[str, StringConstraints(min_length=1, max_length=250_000)]
     name: DisplayName | None = None
+
+
+class LoginInput(BaseModel):
+    token: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=512)]
 
 
 class MemberInput(BaseModel):
@@ -53,9 +63,52 @@ class MemberInput(BaseModel):
 async def _local_operator(request: Request):
     if request.client is None or request.client.host not in {"127.0.0.1", "::1", "testclient"}:
         raise HTTPException(status_code=403, detail="This API accepts local operators only")
+    origin = request.headers.get("origin")
+    if origin and origin != f"{request.url.scheme}://{request.url.netloc}":
+        raise HTTPException(status_code=403, detail="This API accepts same-origin browser requests only")
 
 
-def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, bootstrap=None, search=None) -> FastAPI:
+async def _credential(
+    request: Request, bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(HTTPBearer(auto_error=False))],
+):
+    if "authorization" in request.headers:
+        return bearer.credentials if bearer else None
+    return request.cookies.get(SESSION_COOKIE)
+
+
+Credential = Annotated[str | None, Depends(_credential)]
+
+
+async def _authenticated(request: Request, response: Response, token: Credential):
+    response.headers["Cache-Control"] = "no-store"
+    actor = request.app.state.auth.resolve(token)
+    if actor is None:
+        raise HTTPException(status_code=401, detail="A valid local credential is required",
+                            headers={"WWW-Authenticate": "Bearer"})
+    return actor
+
+
+Identity = Annotated[Principal, Depends(_authenticated)]
+
+
+async def _require_operator(actor: Identity):
+    if not actor.is_operator:
+        raise HTTPException(status_code=403, detail="This action requires the local operator")
+
+
+async def _team_identity(request: Request, team_id: str, actor: Identity):
+    request.app.state.collaboration.team(team_id, actor)
+    return actor
+
+
+def _check_execution_identity(actor: Principal, role: str):
+    allowed = actor.is_operator if role in ROLES else actor.session_id == role
+    if not allowed:
+        raise HTTPException(status_code=404, detail="Execution session not found")
+
+
+def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, bootstrap=None, search=None,
+               operator_token: str | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         state = Path(state_dir or os.environ.get("COLLABORATION_STATE_DIR", ".tmp/runtime"))
@@ -70,12 +123,17 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             )
             runtime = Runtime(selected_model, selected_sandbox, state / "runtime.sqlite3")
             teams = TeamService(runtime.db, selected_model, selected_sandbox, bootstrap)
+            auth = LocalAuth(runtime.db, teams, operator_token if operator_token is not None else operator_credential(state))
+            collaboration = CollaborationService(runtime.db, teams, auth)
             selected_search = search if search is not None else SearchClient.from_env()
             workspace = WorkspaceService(runtime.db, teams, selected_sandbox, state / "team-artifacts", selected_search)
             runtime.workspace_tools = workspace
+            runtime.collaboration = collaboration
             app.state.runtime = runtime
             app.state.teams = teams
             app.state.workspace = workspace
+            app.state.auth = auth
+            app.state.collaboration = collaboration
             yield
         finally:
             if teams is not None:
@@ -89,6 +147,23 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
 
     app = FastAPI(title="Course collaboration runtime", lifespan=lifespan, dependencies=[Depends(_local_operator)])
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    @app.get("/", include_in_schema=False)
+    async def workbench():
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+    @app.post("/v1/auth/login", status_code=204)
+    async def login(body: LoginInput, response: Response, request: Request):
+        if app.state.auth.resolve(body.token) is None:
+            raise HTTPException(status_code=401, detail="Invalid local credential")
+        response.headers["Cache-Control"] = "no-store"
+        response.set_cookie(SESSION_COOKIE, body.token, httponly=True, samesite="strict",
+                            secure=request.url.scheme == "https")
+
+    @app.delete("/v1/auth/session", status_code=204)
+    async def logout(response: Response):
+        response.delete_cookie(SESSION_COOKIE, httponly=True, samesite="strict")
 
     @app.exception_handler(RoleFileError)
     async def invalid_roster(_request, exc):
@@ -106,28 +181,86 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     async def team_unavailable(_request, exc):
         return JSONResponse(status_code=503, content={"detail": str(exc)})
 
-    @app.post("/v1/teams", status_code=201)
+    @app.exception_handler(CollaborationForbidden)
+    async def collaboration_forbidden(_request, exc):
+        return JSONResponse(status_code=403, content={"detail": str(exc)})
+
+    @app.exception_handler(CollaborationInvalid)
+    async def collaboration_invalid(_request, exc):
+        return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+    @app.post("/v1/teams", status_code=201, dependencies=[Depends(_require_operator)])
     async def create_team(body: TeamInput):
         return await app.state.teams.create(body.request_id, body.roster, body.name)
 
-    @app.get("/v1/teams/{team_id}")
-    async def get_team(team_id: str):
-        return app.state.teams.get(team_id)
+    @app.get("/v1/teams")
+    async def list_teams(actor: Identity):
+        return app.state.collaboration.list_teams(actor)
 
-    @app.get("/v1/teams/{team_id}/contracts/{version}")
+    @app.get("/v1/teams/{team_id}")
+    async def get_team(team_id: str, actor: Identity):
+        return app.state.collaboration.team(team_id, actor)
+
+    @app.get("/v1/teams/{team_id}/contracts/{version}", dependencies=[Depends(_team_identity)])
     async def get_contract(team_id: str, version: int):
         return app.state.teams.get_contract(team_id, version)
 
-    @app.post("/v1/teams/{team_id}/members", status_code=201)
+    @app.post("/v1/teams/{team_id}/members", status_code=201, dependencies=[Depends(_require_operator)])
     async def add_member(team_id: str, body: MemberInput):
         return await app.state.teams.add_member(
             team_id, body.request_id, body.expected_version, RoleDefinition(body.role_id, body.name, body.prompt),
         )
 
+    @app.post("/v1/teams/{team_id}/members/{member_id}/credential", dependencies=[Depends(_require_operator)])
+    async def issue_member_credential(team_id: str, member_id: str):
+        return {"token": app.state.auth.issue(team_id, member_id)}
+
+    @app.post("/v1/teams/{team_id}/messages", status_code=201)
+    async def send_message(team_id: str, body: MessageInput, actor: Identity):
+        return app.state.collaboration.send_message(team_id, actor, body)
+
+    @app.get("/v1/teams/{team_id}/messages/{message_id}")
+    async def get_message(team_id: str, message_id: str, actor: Identity):
+        return app.state.collaboration.get_message(team_id, actor, message_id)
+
+    @app.get("/v1/teams/{team_id}/deliveries")
+    async def pending_deliveries(team_id: str, actor: Identity):
+        return app.state.collaboration.pending_deliveries(team_id, actor)
+
+    @app.post("/v1/teams/{team_id}/goals", status_code=201)
+    async def register_goal(team_id: str, body: GoalInput, actor: Identity):
+        return app.state.collaboration.register_goal(team_id, actor, body)
+
+    @app.get("/v1/teams/{team_id}/snapshot")
+    async def team_snapshot(team_id: str, actor: Identity):
+        return app.state.collaboration.snapshot(team_id, actor)
+
+    @app.get("/v1/teams/{team_id}/events", response_class=EventSourceResponse)
+    async def team_events(
+        team_id: str, actor: Annotated[Principal, Depends(_team_identity)], token: Credential,
+        after: str | None = None, last_event_id: Annotated[str | None, Header()] = None, follow: bool = True,
+    ):
+        collaboration = app.state.collaboration
+        cursor = collaboration.resume_position(team_id, actor, last_event_id if last_event_id is not None else after)
+        if cursor is None:
+            yield ServerSentEvent(event="stream.reset", data={"reason": "snapshot_required"})
+            return
+        while app.state.auth.resolve(token) == actor:
+            batch, cursor, has_more = collaboration.events(team_id, actor, cursor)
+            for event_type, seq, data in batch:
+                yield ServerSentEvent(event=event_type, id=collaboration.cursor(team_id, actor, seq), data=data)
+            if has_more:
+                continue
+            if not follow:
+                return
+            await asyncio.sleep(0.2)
+
     @app.get("/v1/artifacts/{artifact_id}/versions/{version}")
-    async def artifact_version(artifact_id: str, version: int, session_id: Annotated[str, Header(alias="X-Session-ID")]):
+    async def artifact_version(artifact_id: str, version: int, actor: Identity):
+        if actor.session_id is None:
+            raise HTTPException(status_code=404, detail="Artifact version not found")
         try:
-            record, path = app.state.workspace.resolve_number(session_id, artifact_id, version)
+            record, path = app.state.workspace.resolve_number(actor.session_id, artifact_id, version)
         except (WorkspaceNotFound, ArtifactNotFound) as exc:
             raise HTTPException(status_code=404, detail="Artifact version not found") from exc
         except ArtifactError as exc:
@@ -152,7 +285,8 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
         return {"status": "ok"}
 
     @app.post("/v1/sessions/{role}/turns", status_code=202)
-    async def start_turn(role: str, body: TurnInput):
+    async def start_turn(role: str, body: TurnInput, caller: Identity):
+        _check_execution_identity(caller, role)
         actor = None
         if role not in ROLES:
             try:
@@ -170,7 +304,8 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
         return {"turn_id": turn_id, "status": "running"}
 
     @app.post("/v1/sessions/{role}/turns/{turn_id}/steer", status_code=202)
-    async def steer_turn(role: str, turn_id: str, body: TurnInput):
+    async def steer_turn(role: str, turn_id: str, body: TurnInput, caller: Identity):
+        _check_execution_identity(caller, role)
         get_turn(role, turn_id)
         try:
             app.state.runtime.steer(role, turn_id, body.text)
@@ -179,22 +314,26 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
         return {"turn_id": turn_id, "status": "queued"}
 
     @app.get("/v1/sessions/{role}/turns/{turn_id}")
-    async def read_turn(role: str, turn_id: str):
+    async def read_turn(role: str, turn_id: str, caller: Identity):
+        _check_execution_identity(caller, role)
         return get_turn(role, turn_id)
 
     @app.get("/v1/sessions/{role}/turns/{turn_id}/events")
     async def read_events(
         role: str,
         turn_id: str,
+        caller: Identity,
+        token: Credential,
         after: Annotated[int, Query(ge=0)] = 0,
         last_event_id: Annotated[int | None, Header(ge=0)] = None,
     ):
+        _check_execution_identity(caller, role)
         get_turn(role, turn_id)
         runtime = app.state.runtime
 
         async def stream():
             cursor = max(after, last_event_id or 0)
-            while True:
+            while app.state.auth.resolve(token) == caller:
                 if role not in ROLES:
                     try:
                         app.state.workspace.actor(role)
@@ -207,7 +346,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
                     return
                 await asyncio.sleep(0.08)
 
-        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+        return StreamingResponse(stream(), media_type="text/event-stream", headers={"Cache-Control": "no-store"})
 
     return app
 

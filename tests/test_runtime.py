@@ -71,7 +71,8 @@ def wait_for_terminal(client, role, turn_id):
 def test_steer_during_tool_execution_and_isolated_event_stream(tmp_path):
     model = ControlledModel()
     sandbox = ControlledSandbox()
-    with TestClient(create_app(model=model, sandbox=sandbox, state_dir=tmp_path)) as client:
+    with TestClient(create_app(model=model, sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token')) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         try:
             started = client.post("/v1/sessions/developer/turns", json={"text": "Implement the task"})
             assert started.status_code == 202

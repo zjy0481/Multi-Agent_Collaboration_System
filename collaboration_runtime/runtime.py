@@ -78,6 +78,7 @@ class Runtime:
         self.active: dict[str, ActiveTurn] = {}
         self.closing = False
         self.workspace_tools = None
+        self.collaboration = None
         self.db = sqlite3.connect(database)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -171,6 +172,8 @@ class Runtime:
                     self._finish(turn.id, "interrupted", error="Server is shutting down")
                     return
                 tools = self.workspace_tools.tools_for(role) if workspace_id is not None else TOOLS
+                if workspace_id is not None and self.collaboration is not None:
+                    tools.extend(self.collaboration.tools_for(role))
                 with self.db:
                     for new_text in turn.pending:
                         self._event(turn.id, "turn.input_applied", text=new_text)
@@ -221,7 +224,9 @@ class Runtime:
             with self.db:
                 self._event(turn.id, "tool.started", name=name, tool_call_id=call_id)
             arguments = call["function"]["arguments"]
-            if workspace_id is not None:
+            if workspace_id is not None and self.collaboration is not None and self.collaboration.handles(name):
+                result = self.collaboration.execute_tool(role, name, arguments)
+            elif workspace_id is not None:
                 result = await self.workspace_tools.execute(role, name, arguments)
             else:
                 result = await asyncio.to_thread(self._dispatch, role, name, arguments)

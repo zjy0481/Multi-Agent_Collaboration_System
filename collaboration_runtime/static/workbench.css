@@ -1,0 +1,292 @@
+:root {
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+  color: #19283b;
+  background: #f2f5f8;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+header {
+  background: #152c43;
+  color: white;
+  padding: 22px 4%;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 16px;
+}
+h1,
+h2,
+p {
+  margin: 0;
+}
+h1 {
+  font-size: 1.6rem;
+  margin-top: 5px;
+}
+h2 {
+  font-size: 1.05rem;
+}
+.eyebrow {
+  font-size: 0.67rem;
+  letter-spacing: 0.13em;
+  color: #68849b;
+  font-weight: 700;
+}
+header .eyebrow {
+  color: #a4bed0;
+}
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+#connection {
+  font-size: 0.8rem;
+  margin-right: 8px;
+}
+main {
+  padding: 22px 4%;
+}
+.layout {
+  display: grid;
+  grid-template-columns: 210px minmax(300px, 1fr) 260px;
+  gap: 16px;
+  align-items: start;
+}
+.card {
+  background: white;
+  border: 1px solid #dbe3e9;
+  border-radius: 12px;
+  box-shadow: 0 3px 16px #18334a0b;
+}
+.sidebar,
+.goals {
+  padding: 18px;
+}
+.sidebar h2 {
+  margin: 25px 0 10px;
+}
+label {
+  font-size: 0.82rem;
+  font-weight: 650;
+}
+select,
+input,
+textarea,
+button {
+  font: inherit;
+  border: 1px solid #cbd7df;
+  border-radius: 7px;
+  padding: 9px;
+  background: white;
+  color: inherit;
+}
+select,
+input,
+textarea {
+  width: 100%;
+}
+textarea {
+  resize: vertical;
+  margin: 7px 0;
+}
+button {
+  cursor: pointer;
+}
+button:hover {
+  border-color: #337d82;
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+.primary {
+  background: #176f72;
+  color: white;
+  border-color: #176f72;
+}
+.sidebar nav button {
+  display: block;
+  text-align: left;
+  width: 100%;
+  border: 0;
+  margin: 3px 0;
+}
+.sidebar nav button.active {
+  background: #e4f2f1;
+  color: #145c60;
+  font-weight: 700;
+}
+.chat {
+  overflow: hidden;
+}
+.section-head {
+  padding: 17px 20px;
+  border-bottom: 1px solid #e5ebef;
+}
+.section-head h2 {
+  margin-top: 5px;
+}
+.messages {
+  height: 49vh;
+  min-height: 260px;
+  overflow: auto;
+  padding: 20px;
+  background: #fbfcfd;
+}
+.message {
+  padding: 12px 0;
+  border-bottom: 1px solid #e9eef1;
+}
+.meta {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+  color: #687d8d;
+}
+.meta strong {
+  color: #1b3448;
+  font-size: 0.9rem;
+}
+.message p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  margin: 6px 0;
+}
+.message button {
+  font-size: 0.72rem;
+  padding: 4px 7px;
+  margin-right: 5px;
+}
+.message .quote {
+  color: #687d8d;
+  font-size: 0.78rem;
+}
+.empty {
+  color: #728695;
+  font-size: 0.9rem;
+  padding: 10px 0;
+}
+#composer {
+  padding: 16px 20px;
+}
+.compose-options {
+  display: flex;
+  align-items: end;
+  gap: 12px;
+}
+.compose-options label {
+  flex: 1;
+}
+.compose-options select {
+  display: block;
+  margin-top: 5px;
+}
+.compose-options select[multiple] {
+  height: 68px;
+}
+small {
+  display: block;
+  color: #728695;
+  margin-top: 8px;
+}
+.reply {
+  padding: 8px;
+  background: #edf6f5;
+  border-radius: 6px;
+  margin-bottom: 10px;
+  font-size: 0.85rem;
+}
+.reply button {
+  float: right;
+  padding: 2px 6px;
+}
+.goals h2 {
+  margin: 5px 0 14px;
+}
+.goal {
+  border-top: 1px solid #e5ebef;
+  padding: 12px 0;
+  font-size: 0.85rem;
+  overflow-wrap: anywhere;
+}
+.goal strong {
+  display: block;
+  margin-bottom: 5px;
+}
+.login {
+  max-width: 420px;
+  margin: 8vh auto;
+  padding: 28px;
+}
+.login p {
+  margin: 10px 0 20px;
+  color: #687d8d;
+}
+.login input {
+  margin: 6px 0 14px;
+}
+.login button {
+  width: 100%;
+}
+#notice {
+  color: #a13a32;
+  margin-top: 12px;
+  white-space: pre-wrap;
+}
+@media (max-width: 850px) {
+  .layout {
+    grid-template-columns: 180px minmax(0, 1fr);
+  }
+  .goals {
+    grid-column: 1/-1;
+  }
+}
+@media (max-width: 560px) {
+  header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .layout {
+    display: block;
+  }
+  .sidebar,
+  .chat,
+  .goals {
+    margin-bottom: 12px;
+  }
+  .sidebar nav {
+    display: flex;
+    overflow: auto;
+  }
+  .sidebar nav button {
+    width: auto;
+    white-space: nowrap;
+  }
+  .sidebar h2 {
+    margin: 15px 0 5px;
+  }
+  .messages {
+    height: 43vh;
+  }
+  .compose-options {
+    flex-wrap: wrap;
+  }
+  .compose-options label {
+    min-width: 120px;
+  }
+}
+[hidden] {
+  display: none !important;
+}

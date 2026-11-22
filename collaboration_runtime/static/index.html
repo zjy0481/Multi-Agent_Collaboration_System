@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>协作工作台</title>
+    <link rel="stylesheet" href="/static/workbench.css" />
+  </head>
+  <body>
+    <header>
+      <div><h1>协作工作台</h1></div>
+      <div class="header-actions">
+        <span id="connection" role="status">未连接</span
+        ><button id="refresh" type="button">刷新</button
+        ><button id="logout" type="button">退出</button>
+      </div>
+    </header>
+    <main>
+      <section id="login" class="card login" hidden>
+        <h2>连接工作台</h2>
+        <p>输入本机访问令牌以继续。</p>
+        <form id="login-form">
+          <label for="token">访问令牌</label
+          ><input
+            id="token"
+            type="password"
+            autocomplete="current-password"
+            required
+          /><button class="primary">登录</button>
+        </form>
+      </section>
+      <div id="workspace" class="layout" hidden>
+        <aside class="card sidebar">
+          <label for="teams">团队</label
+          ><select id="teams"></select>
+          <h2>会话</h2>
+          <nav id="conversations" aria-label="会话"></nav>
+        </aside>
+        <section class="card chat">
+          <div class="section-head">
+            <div><h2 id="conversation-title">群聊</h2></div>
+          </div>
+          <div id="messages" class="messages" aria-live="polite"></div>
+          <form id="composer">
+            <div id="reply" class="reply" hidden></div>
+            <label for="text">消息</label
+            ><textarea
+              id="text"
+              rows="3"
+              required
+              placeholder="输入消息，按发送提交"
+            ></textarea>
+            <div class="compose-options">
+              <label
+                >类型
+                <select id="kind">
+                  <option value="chat">聊天</option>
+                  <option value="progress">进展</option>
+                  <option value="assignment">布置</option>
+                  <option value="supplement">补充</option>
+                </select></label
+              ><label
+                >点名
+                <select
+                  id="mentions"
+                  multiple
+                  aria-label="点名成员"
+                ></select></label
+              ><button class="primary" id="send">发送</button>
+            </div>
+            <small>按住 Ctrl 或 Command 可选择多个点名成员。</small>
+          </form>
+        </section>
+        <aside class="card goals">
+          <h2>活动与排队目标</h2>
+          <div id="goals"></div>
+        </aside>
+      </div>
+      <p id="notice" role="alert"></p>
+    </main>
+    <script src="/static/workbench.js" defer></script>
+  </body>
+</html>
