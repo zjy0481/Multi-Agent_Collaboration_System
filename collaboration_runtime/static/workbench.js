@@ -7,6 +7,7 @@ const state = {
   participants: [],
   messages: [],
   goals: [],
+  questions: [],
   peer: null,
   reply: null,
   stream: null,
@@ -62,8 +63,10 @@ function showLogin() {
   state.actor = null;
   state.messages = [];
   state.goals = [];
+  state.questions = [];
   $("messages").replaceChildren();
   $("goals").replaceChildren();
+  $("questions").replaceChildren();
   state.generation++;
   state.stream?.close();
   state.stream = null;
@@ -94,6 +97,8 @@ async function loadTeams() {
     $("conversations").replaceChildren();
     $("messages").replaceChildren(element("p", "暂无团队", "empty"));
     $("goals").replaceChildren();
+    state.questions = [];
+    $("questions").replaceChildren();
     return;
   }
   $("composer")
@@ -121,8 +126,10 @@ async function loadTeam(id, preserve = false) {
     state.peer = null;
     state.messages = [];
     state.goals = [];
+    state.questions = [];
     $("messages").replaceChildren();
     $("goals").replaceChildren();
+    $("questions").replaceChildren();
     $("conversations").replaceChildren();
     $("conversation-title").textContent = "群聊";
   }
@@ -143,6 +150,7 @@ async function loadTeam(id, preserve = false) {
     state.participants = s.participants || [];
     state.messages = s.messages || [];
     state.goals = s.goals || [];
+    state.questions = s.questions || [];
     state.seq = Math.max(0, ...state.messages.map((m) => Number(m.seq) || 0));
     render();
     setComposerEnabled(true);
@@ -179,6 +187,13 @@ function connect(cursor, generation) {
           !state.messages.some((m) => m.id === data.message.id)
         )
           state.messages.push(data.message);
+        if (type === "message.created" && data.question) {
+          const index = state.questions.findIndex(
+            (q) => q.question_id === data.question.question_id,
+          );
+          if (index < 0) state.questions.push(data.question);
+          else state.questions[index] = data.question;
+        }
         if (
           type === "goal.registered" &&
           !state.goals.some((g) => g.id === data.goal.id)
@@ -277,14 +292,18 @@ function render() {
         element("div", `点名：${m.mentions.map(nameOf).join("、")}`, "quote"),
       );
     item.append(element("p", m.text));
-    const reply = element("button", "引用");
-    reply.type = "button";
-    reply.onclick = () => {
-      state.reply = m.id;
-      renderReply();
-      $("text").focus();
-    };
-    item.append(reply);
+    const question = state.questions.find((q) => q.question_id === m.id);
+    if (m.kind !== "question" || (state.actor === "local-operator" && question && !question.answer_message_id)) {
+      const reply = element("button", m.kind === "question" ? "答复" : "引用");
+      reply.type = "button";
+      reply.onclick = () => {
+        state.reply = m.id;
+        if (m.kind === "question") $("kind").value = "chat";
+        renderReply();
+        $("text").focus();
+      };
+      item.append(reply);
+    }
     if (
       state.actor === state.lead &&
       m.sender_id === "local-operator" &&
@@ -299,6 +318,7 @@ function render() {
     list.append(item);
   }
   renderReply();
+  renderQuestions();
   const goals = $("goals");
   goals.replaceChildren();
   if (!state.goals.length) goals.append(element("p", "暂无目标", "empty"));
@@ -317,6 +337,37 @@ function render() {
       element("div", `修订 ${g.revision}`),
     );
     goals.append(row);
+  }
+}
+function renderQuestions() {
+  const list = $("questions");
+  list.replaceChildren();
+  const pending = state.questions.filter((q) => !q.answer_message_id);
+  if (!pending.length) list.append(element("p", "暂无待答问题", "empty"));
+  for (const q of pending) {
+    const message = state.messages.find((m) => m.id === q.question_id);
+    if (!message) continue;
+    const row = element("div", null, "question");
+    row.append(
+      element("strong", nameOf(q.asker_id)),
+      element("div", message.text.slice(0, 120)),
+      element("small", message.recipient_id ? `私聊 · ${nameOf(q.asker_id)}` : "群聊"),
+    );
+    if (state.actor === "local-operator") {
+      const answer = element("button", "答复");
+      answer.type = "button";
+      answer.onclick = () => {
+        state.peer = message.recipient_id
+          ? (message.sender_id === state.actor ? message.recipient_id : message.sender_id)
+          : null;
+        state.reply = q.question_id;
+        $("kind").value = "chat";
+        render();
+        $("text").focus();
+      };
+      row.append(answer);
+    }
+    list.append(row);
   }
 }
 function renderReply() {
@@ -387,6 +438,11 @@ $("composer").onsubmit = async (e) => {
   e.preventDefault();
   const text = $("text").value.trim();
   if (!text || !state.team) return;
+  const question = state.questions.find((q) => q.question_id === state.reply);
+  if (question?.answer_message_id) {
+    notice("该问题已有答复，请取消引用后发送其他消息");
+    return;
+  }
   const body = {
     text,
     kind: $("kind").value,

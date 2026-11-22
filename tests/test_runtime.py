@@ -7,6 +7,7 @@ import time
 from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
+from test_collaboration import OPERATOR, Sandbox, auth, bootstrap, send, setup_team, snapshot
 
 
 class ControlledModel:
@@ -62,7 +63,7 @@ def wait_for_terminal(client, role, turn_id):
         response = client.get(f"/v1/sessions/{role}/turns/{turn_id}")
         assert response.status_code == 200
         data = response.json()
-        if data["status"] in ("completed", "failed"):
+        if data["status"] != "running":
             return data
         time.sleep(0.02)
     raise AssertionError("turn did not reach a terminal state")
@@ -110,3 +111,58 @@ def test_steer_during_tool_execution_and_isolated_event_stream(tmp_path):
         assert body.count("event: model.completed") == 3
         assert "PRIVATE_REASONING_SENTINEL" not in body
         assert client.get(f"/v1/sessions/tester/turns/{turn_id}/events").status_code in (403, 404)
+
+
+def test_model_question_yields_slot_and_preserves_tool_call_history(tmp_path):
+    class AskingModel:
+        calls = 0
+        work_id = None
+
+        async def complete(self, messages, tools):
+            self.calls += 1
+            if self.calls == 1:
+                assert "ask_human" in {tool["function"]["name"] for tool in tools}
+                return {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "ask", "type": "function", "function": {"name": "ask_human", "arguments": json.dumps({
+                        "request_id": "question", "source_message_id": self.work_id, "text": "Which rule should I use?",
+                    })}},
+                    {"id": "skip", "type": "function", "function": {"name": "send_message", "arguments": json.dumps({
+                        "request_id": "unexpected", "text": "The work is done.",
+                    })}},
+                ]}
+            results = [m for m in messages if m["role"] == "tool"]
+            assert [m["tool_call_id"] for m in results] == ["ask", "skip"]
+            assert json.loads(results[0]["content"])["ok"]
+            assert not json.loads(results[1]["content"])["ok"]
+            assert messages[-1]["content"] == "Use rule A"
+            return {"role": "assistant", "content": "I will use rule A."}
+
+    model = AskingModel()
+    application = create_app(model=model, sandbox=Sandbox(), state_dir=tmp_path,
+                             bootstrap=bootstrap, operator_token=OPERATOR)
+    with TestClient(application) as client:
+        base, lead, _, tokens = setup_team(client)
+        client.headers.update(auth(tokens[lead["member_id"]]))
+        work = send(client, base, OPERATOR, request_id="work", text="Do the work", kind="assignment")
+        model.work_id = work["message_id"]
+        session = lead["session_id"]
+        endpoint = f"/v1/sessions/{session}/turns"
+        started = client.post(endpoint, json={"text": "Review the assignment"})
+        assert started.status_code == 202
+        turn_id = started.json()["turn_id"]
+        assert wait_for_terminal(client, session, turn_id)["status"] == "waiting_human"
+        assert model.calls == 1
+
+        state = snapshot(client, base, OPERATOR)
+        assert not state["goals"]
+        assert len(state["messages"]) == 2
+        question_id = state["questions"][0]["question_id"]
+        answer = send(client, base, OPERATOR, request_id="answer", text="Use rule A", reply_to=question_id)
+        ready = client.get(f"{base}/deliveries").json()
+        assert [item["message_id"] for item in ready] == [answer["message_id"]]
+
+        # A controlled claimant starts the next turn with the delivered input.
+        resumed = client.post(endpoint, json={"text": "Use rule A"})
+        assert resumed.status_code == 202
+        result = wait_for_terminal(client, session, resumed.json()["turn_id"])
+        assert result["status"] == "completed", result

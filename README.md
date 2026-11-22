@@ -48,6 +48,14 @@ $team.members | Select-Object role_id, name, session_id, workspace_id
 
 消息续读使用 FastAPI 0.139.0 的原生 SSE 和浏览器 `EventSource`。可运行 `python -m pytest -q tests/test_collaboration.py` 核对权限、并发重放、待办恢复和目标排队。 [FastAPI SSE](https://fastapi.tiangolo.com/tutorial/server-sent-events/) · [T002 验收用例](tests/test_collaboration.py)
 
+## T003 真人澄清
+
+正式成员可用 `ask_human` 提问，传入 `request_id`、已投递给本会话的 `source_message_id` 和 `text`。登记目标前也可询问。问题默认显示在群聊，引用双方私聊中的布置会保留原可见范围。
+
+1. 在工作台「待答问题」点击「答复」，输入答案并发送。服务端按引用认定原提问者，即使消息同时点名其他成员。
+2. 同一工作还有其他问题待答时继续阻塞。最后一条有效答复产生一条 `clarification.resume` 待办，包含原工作消息 ID 和相关答复 ID。已答问题如需变更，可引用原答复发送更正，提问者和引用了该决定的正式成员会收到通知。
+3. 发起提问的模型回合以 `waiting_human` 释放会话执行槽。问题和待办保存在 SQLite，重启后可用原引用答复。T003 可通过 `GET /v1/teams/{team_id}/deliveries` 核对恢复投递，待办自动领取和启动模型回合由 T006 接入。
+
 ## T005 私有工作区与产物交接
 
 对已导入团队的正式成员发起回合。成员可以调用 `create_file`、`read_file`、`update_file`、`delete_file` 操作自己的工作区，并通过 `run_command` 执行代码和测试。工作区文件使用相对路径，发布或文件写入单次上限为 1 MiB。

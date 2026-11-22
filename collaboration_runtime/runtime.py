@@ -158,7 +158,7 @@ class Runtime:
 
     def _history(self, role: str) -> list[dict]:
         rows = self.db.execute(
-            "SELECT history FROM turns WHERE role = ? AND status = 'completed' ORDER BY rowid",
+            "SELECT history FROM turns WHERE role = ? AND status IN ('completed', 'waiting_human') ORDER BY rowid",
             (role,),
         )
         return [message for row in rows for message in json.loads(row["history"])]
@@ -190,8 +190,12 @@ class Runtime:
                     self._event(turn.id, "model.completed", step=step, tool_count=len(calls))
                 current.append(assistant)
                 if calls:
+                    waiting = False
                     for call in calls:
-                        await self._apply_tool(role, turn, call, current, workspace_id)
+                        waiting = await self._apply_tool(role, turn, call, current, workspace_id, waiting=waiting)
+                    if waiting:
+                        self._finish(turn.id, "waiting_human", history=current)
+                        return
                     continue
                 reply = assistant.get("content")
                 if turn.pending:
@@ -214,10 +218,13 @@ class Runtime:
         finally:
             self.active.pop(role, None)
 
-    async def _apply_tool(self, role: str, turn: ActiveTurn, call: dict, history: list[dict], workspace_id):
+    async def _apply_tool(self, role: str, turn: ActiveTurn, call: dict, history: list[dict], workspace_id, *, waiting):
         name = call["function"]["name"]
         call_id = call["id"]
-        if turn.pending or self.closing:
+        if waiting:
+            result = {"ok": False, "error": "Work is waiting for a human answer."}
+            outcome = "tool.skipped"
+        elif turn.pending or self.closing:
             result = {"ok": False, "error": "Input changed. Decide again before using this tool."}
             outcome = "tool.skipped"
         else:
@@ -226,6 +233,9 @@ class Runtime:
             arguments = call["function"]["arguments"]
             if workspace_id is not None and self.collaboration is not None and self.collaboration.handles(name):
                 result = self.collaboration.execute_tool(role, name, arguments)
+                if name == "ask_human" and result["ok"]:
+                    question_id = result["result"]["question"]["question_id"]
+                    waiting = self.collaboration.question_waiting(question_id)
             elif workspace_id is not None:
                 result = await self.workspace_tools.execute(role, name, arguments)
             else:
@@ -238,6 +248,7 @@ class Runtime:
         })
         with self.db:
             self._event(turn.id, outcome, name=name, tool_call_id=call_id, result=result)
+        return waiting
 
     def _dispatch(self, role: str, name: str, raw_arguments: str) -> dict:
         try:

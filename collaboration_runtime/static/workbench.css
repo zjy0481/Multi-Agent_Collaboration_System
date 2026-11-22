@@ -215,15 +215,22 @@ small {
 .goals h2 {
   margin: 5px 0 14px;
 }
-.goal {
+.goal,
+.question {
   border-top: 1px solid #e5ebef;
   padding: 12px 0;
   font-size: 0.85rem;
   overflow-wrap: anywhere;
 }
-.goal strong {
+.goal strong,
+.question strong {
   display: block;
   margin-bottom: 5px;
+}
+.question button {
+  font-size: 0.78rem;
+  padding: 4px 8px;
+  margin-top: 7px;
 }
 .login {
   max-width: 420px;
