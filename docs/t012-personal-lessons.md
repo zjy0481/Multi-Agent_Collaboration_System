@@ -26,7 +26,7 @@
 
 ## HTTP 接口
 
-`build_router(authenticated)` 通过应用现有的 `_authenticated` 依赖完成本机鉴权及 `Cache-Control: no-store` 响应边界，不重复实现凭据解析。调用者必须是正式成员，本地操作者由路由返回 `403`。第三个未获交接的成员只能看到空检索结果，不能直接读取经验正文或交接。
+`build_router(authenticated)` 通过应用现有的 `_authenticated` 依赖完成本机鉴权，并复用 `Cache-Control: no-store` 边界，不重复实现凭据解析。调用者必须是正式成员，本地操作者由路由返回 `403`。第三个未获交接的成员只能看到空检索结果，不能直接读取经验正文或交接。
 
 | 方法与路径 | 作用 |
 |---|---|
@@ -55,13 +55,13 @@
 - `observe_lesson`
 - `get_experience`
 
-助手只能看到 `retrieve_lessons`、`read_lesson` 和 `read_handoff`，且同时要求 fork 处于有效状态、目标题等于 fork 目标、助手获准包含经验读取工具、经验/版本已显式交接、经验来源版本仍在 fork 的材料列表中并对父代理可读。撤权或任务范围失效后工具不可用。
+助手只看到其 fork `allowed_tools` 明确列出且服务端允许的 `retrieve_lessons`、`read_lesson` 和 `read_handoff`，不因拥有 `read_file` 等 workspace 工具而获得经验读取。调用时同时要求 fork 处于有效状态、目标题等于 fork 目标、经验/版本已显式交接、经验来源版本仍在 fork 的材料列表中并对父代理可读。撤权或任务范围失效后工具不可用。
 
 ## 生产接线
 
-当前分支只包含 T012 专属模块、测试和本文件。公共接线应在协调者指定的精确 T009 SHA 上单独完成：
+`create_app` 已按精确 T009 合并基线完成公共接线：
 
-1. 在 `create_app` 创建 `ForkService` 后构造：
+1. 创建 `ForkService` 后构造并挂载：
 
    ```python
    experience = ExperienceService(collaboration, workspace, forks)
@@ -71,7 +71,7 @@
    runtime.experience_tools = experience_tools
    ```
 
-2. 在应用启动前注册：
+2. `create_app` 在应用启动前注册：
 
    ```python
    from collaboration_runtime.api import _authenticated
@@ -81,24 +81,24 @@
    ```
 
    不另建凭据解析或缓存边界。
-3. 在 `Runtime._run` 的工具列表中加入 `experience_tools.tools_for(role)`。
-4. 在 `Runtime._execute_tool` 中，对 `experience_tools.handles(name)` 分派到 `experience_tools.execute(role, name, arguments)`。
-5. 在 `workspace.py` 的助手工具白名单中加入 `retrieve_lessons`、`read_lesson` 和 `read_handoff`，使创建 fork 时能明确授予这些能力。
+3. `Runtime._run` 将 `experience_tools.tools_for(role)` 加入真实模型工具列表。
+4. `Runtime._execute_tool` 对 `experience_tools.handles(name)` 分派到 `experience_tools.execute(role, name, arguments)`，并把这些幂等或带请求回执的工具列入可重放集合。
+5. `workspace.py` 接受助手将 `retrieve_lessons`、`read_lesson` 和 `read_handoff` 注册为 fork 允许工具；经验工具本身仍由 Runtime 注入，并由 fork 当前 `allowed_tools` 精确裁剪。
 
-测试使用构造参数 `assistant_read_tools={"read_file"}` 验证真实 fork 的服务端范围检查；生产接线必须保留默认的 `retrieve_lessons`，不要用 `read_file` 代替经验读取权限。
+默认助手经验读取集合包含上述三项。验收使用真实 fork job 和确定性模型经 `Runtime._run` 调用允许的工具，不使用 `read_file` 代替经验读取。
 
 ## 验证
 
-`tests/test_experience.py` 使用真实 SQLite、既有团队/目标/产物服务及真实 `ForkService`，覆盖：
+`tests/test_experience.py` 使用生产 `create_app`、真实 SQLite、既有团队/目标/产物服务、真实 `ForkService` 和 T009 正式目标状态接口，覆盖：
 
 - 第一题作者、第二题接收者和未获交接第三成员的读取边界。
 - 来源目标、目标经验和固定版本的第二题显式交接。
 - 无经验正文的纯版本交接、发送者/指定接收者复核、第三方不可见及撤权后重启仍拒绝。
 - 检索、三次采用动作及行为改变、无变化、经验失效观察，重启后复核。
-- 目标结束后拒绝新采用/观察，同时保留既有检索、采用、观察和重放回执。
+- 通过 T009 正式取消/激活接口切换目标；目标结束后拒绝新采用/观察，同时保留既有检索、采用、观察和重放回执。
 - 交接时及读取时来源 ACL 的正反例。
 - 未授权交接不泄露经验或接收者存在性。
-- 授权助手在有效 fork 内读取经验和交接、跨目标题拒绝、撤权后拒绝。
+- 确定性模型在真实 fork job 中经 `Runtime._run`/`_execute_tool` 检索、直读经验和交接；撤权后工具列表为空且调用被拒绝。
 
 运行：
 

@@ -6,8 +6,8 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
-from collaboration_runtime.api import _authenticated, create_app
-from collaboration_runtime.experience import ExperienceService, ExperienceTools, build_router
+from collaboration_runtime.api import create_app
+from collaboration_runtime.scheduler import DeliveryScheduler
 from collaboration_runtime.teams import LeadDecision
 from test_collaboration import OPERATOR, Sandbox, app, auth, bootstrap, send, setup_team
 
@@ -30,44 +30,38 @@ def second_goal(client, base, lead, token):
     ))["goal_id"]
 
 
-def activate_goal(client, goal_id):
-    def activate():
-        with client.app.state.runtime.db:
-            client.app.state.runtime.db.execute(
-                "UPDATE team_goals SET status = 'completed' WHERE status = 'active' AND id != ?",
-                (goal_id,),
-            )
-            client.app.state.runtime.db.execute(
-                "UPDATE team_goals SET status = 'active' WHERE id = ?", (goal_id,),
-            )
-
-    client.portal.call(activate)
-
-
-def end_goal(client, goal_id):
-    def end():
-        with client.app.state.runtime.db:
-            client.app.state.runtime.db.execute(
-                "UPDATE team_goals SET status = 'completed' WHERE id = ?", (goal_id,),
-            )
-
-    client.portal.call(end)
-
-
-def install(client, **options):
-    service = client.portal.call(partial(
-        ExperienceService,
-        client.app.state.collaboration,
-        client.app.state.workspace,
-        client.app.state.runtime.forks,
-        **options,
-    ))
-    client.app.state.experience = service
-    client.app.state.experience_tools = ExperienceTools(
-        service, client.app.state.auth, client.app.state.workspace,
+def activate_goal(client, base, lead_token, current_goal, next_goal):
+    cancelled = client.post(
+        f"{base}/goals/{current_goal}/terminate",
+        headers=auth(OPERATOR),
+        json={
+            "request_id": key(),
+            "expected_revision": 1,
+            "outcome": "cancelled",
+            "reason": "Move to the next queued goal.",
+        },
     )
-    client.app.include_router(build_router(_authenticated))
-    return service
+    assert cancelled.status_code == 201, cancelled.text
+    activated = client.post(
+        f"{base}/goals/{next_goal}/activate",
+        headers=auth(lead_token),
+        json={"request_id": key(), "expected_revision": 1},
+    )
+    assert activated.status_code == 201, activated.text
+
+
+def end_goal(client, base, goal_id):
+    ended = client.post(
+        f"{base}/goals/{goal_id}/terminate",
+        headers=auth(OPERATOR),
+        json={
+            "request_id": key(),
+            "expected_revision": 1,
+            "outcome": "cancelled",
+            "reason": "End the acceptance verification goal.",
+        },
+    )
+    assert ended.status_code == 201, ended.text
 
 
 def publish(client, team_id, member, readers, content):
@@ -115,8 +109,6 @@ def test_cross_goal_handoff_retrieval_use_and_observation_survive_restart(tmp_pa
         author_token = tokens[author["member_id"]]
         recipient_token = tokens[recipient["member_id"]]
         outsider_token = tokens[outsider["member_id"]]
-        install(client)
-
         team_id = base.rsplit("/", 1)[-1]
         source = publish(client, team_id, author, [author, recipient], b"real booking records")
         payload = record(first_goal, source)
@@ -153,7 +145,7 @@ def test_cross_goal_handoff_retrieval_use_and_observation_survive_restart(tmp_pa
             headers=auth(author_token),
             json=handoff_body,
         ))
-        activate_goal(client, second)
+        activate_goal(client, base, tokens[lead["member_id"]], first_goal, second)
         assert ok(client.post(
             f"{base}/lesson-handoffs", headers=auth(author_token), json=handoff_body,
         )) == handoff
@@ -261,7 +253,6 @@ def test_cross_goal_handoff_retrieval_use_and_observation_survive_restart(tmp_pa
         ))["counts"]["lessons"] == 0
 
     with TestClient(app(tmp_path)) as recovered:
-        install(recovered)
         restored = ok(recovered.get(
             f"{base}/experience",
             headers=auth(recipient_token),
@@ -287,7 +278,6 @@ def test_source_permission_is_checked_again_before_search_and_match(tmp_path):
         author_token = tokens[author["member_id"]]
         recipient_token = tokens[recipient["member_id"]]
         outsider_token = tokens[outsider["member_id"]]
-        install(client)
         source = publish(client, base.rsplit("/", 1)[-1], author, [author, recipient], b"traceable source")
         lesson_id = ok(client.post(
             f"{base}/lessons",
@@ -342,7 +332,6 @@ def test_member_handoff_to_unshared_source_is_rejected(tmp_path):
         second = second_goal(client, base, lead, tokens[lead["member_id"]])
         author, recipient = others[:2]
         author_token = tokens[author["member_id"]]
-        install(client)
         source = publish(client, base.rsplit("/", 1)[-1], author, [author], b"author only")
         lesson_id = ok(client.post(
             f"{base}/lessons",
@@ -376,7 +365,6 @@ def test_handoff_failure_does_not_disclose_lesson_or_recipient_existence(tmp_pat
         ))["goal_id"]
         second = second_goal(client, base, lead, tokens[lead["member_id"]])
         author, recipient, outsider = others[:3]
-        install(client)
         source = publish(client, base.rsplit("/", 1)[-1], author, [author], b"owner only")
         lesson_id = ok(client.post(
             f"{base}/lessons",
@@ -414,12 +402,11 @@ def test_version_only_handoff_is_readable_by_recipient_and_rechecks_current_acl(
             json={"request_id": key(), "source_message_id": assignment["message_id"]},
         ))["goal_id"]
         second = second_goal(client, base, lead, tokens[lead["member_id"]])
-        activate_goal(client, second)
+        activate_goal(client, base, tokens[lead["member_id"]], first, second)
         author, recipient, outsider = others[:3]
         author_token = tokens[author["member_id"]]
         recipient_token = tokens[recipient["member_id"]]
         outsider_token = tokens[outsider["member_id"]]
-        install(client)
         version = publish(
             client, base.rsplit("/", 1)[-1], author, [author, recipient], b"fixed release evidence",
         )
@@ -459,7 +446,6 @@ def test_version_only_handoff_is_readable_by_recipient_and_rechecks_current_acl(
         assert tool_result["result"]["artifact_version_ids"] == [version["version_id"]]
 
     with TestClient(app(tmp_path)) as recovered:
-        install(recovered)
         assert ok(recovered.get(
             f"{base}/lesson-handoffs/{handoff_id}", headers=auth(recipient_token),
         ))["artifact_version_ids"] == [version["version_id"]]
@@ -485,7 +471,6 @@ def test_version_only_handoff_is_readable_by_recipient_and_rechecks_current_acl(
         ))["handoffs"] == []
 
     with TestClient(app(tmp_path)) as recovered_again:
-        install(recovered_again)
         assert recovered_again.get(
             f"{base}/lesson-handoffs/{handoff_id}", headers=auth(recipient_token),
         ).status_code == 404
@@ -501,11 +486,10 @@ def test_terminal_goal_rejects_new_adoption_but_keeps_authorized_history(tmp_pat
             json={"request_id": key(), "source_message_id": assignment["message_id"]},
         ))["goal_id"]
         second = second_goal(client, base, lead, tokens[lead["member_id"]])
-        activate_goal(client, second)
+        activate_goal(client, base, tokens[lead["member_id"]], first, second)
         author, recipient = others[:2]
         author_token = tokens[author["member_id"]]
         recipient_token = tokens[recipient["member_id"]]
-        install(client)
         source = publish(
             client, base.rsplit("/", 1)[-1], author, [author, recipient], b"adoption evidence",
         )
@@ -549,7 +533,7 @@ def test_terminal_goal_rejects_new_adoption_but_keeps_authorized_history(tmp_pat
             json=observation_body,
         ))
 
-        end_goal(client, second)
+        end_goal(client, base, second)
         terminal_retrieval = ok(retrieve(client, base, recipient_token, second, "booking"))
         assert [item["id"] for item in terminal_retrieval["lessons"]] == [lesson_id]
         assert client.post(
@@ -586,7 +570,6 @@ def test_terminal_goal_rejects_new_adoption_but_keeps_authorized_history(tmp_pat
         ))["lessons"][0]["id"] == lesson_id
 
     with TestClient(app(tmp_path)) as recovered:
-        install(recovered)
         restored = ok(recovered.get(
             f"{base}/experience",
             headers=auth(recipient_token),
@@ -617,13 +600,15 @@ def test_router_reuses_authentication_and_no_store_boundary(tmp_path):
             headers=auth(tokens[lead["member_id"]]),
             json={"request_id": key(), "source_message_id": assignment["message_id"]},
         ))["goal_id"]
-        install(client)
         payload = record(goal, {"version_id": key()})
         missing = client.post(f"{base}/lessons", json=payload)
         assert missing.status_code == 401
-        assert client.post(
+        assert missing.headers["cache-control"] == "no-store"
+        operator = client.post(
             f"{base}/lessons", headers=auth(OPERATOR), json=payload,
-        ).status_code == 403
+        )
+        assert operator.status_code == 403
+        assert operator.headers["cache-control"] == "no-store"
         visible = client.get(
             f"{base}/experience",
             headers=auth(tokens[others[0]["member_id"]]),
@@ -631,11 +616,6 @@ def test_router_reuses_authentication_and_no_store_boundary(tmp_path):
         )
         assert visible.status_code == 200
         assert visible.headers["cache-control"] == "no-store"
-
-
-class CompletedModel:
-    async def complete(self, messages, tools):
-        return {"role": "assistant", "content": "completed"}
 
 
 def wait_for(predicate, timeout=5):
@@ -648,9 +628,152 @@ def wait_for(predicate, timeout=5):
     raise AssertionError("timed out")
 
 
-def test_authorized_assistant_uses_handoff_inside_active_fork_and_loses_access_on_revoke(tmp_path):
+class MemberToolCallingModel:
+    def __init__(self):
+        self.goal_id = None
+        self.source_id = None
+        self.tool_names = None
+        self.tool_results = None
+
+    async def complete(self, messages, tools):
+        if messages[-1]["role"] == "tool":
+            self.tool_results = [
+                json.loads(message["content"]) for message in messages if message["role"] == "tool"
+            ]
+            return {"role": "assistant", "content": "recorded and retrieved the lesson"}
+        self.tool_names = {item["function"]["name"] for item in tools}
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "record-personal-lesson",
+                    "type": "function",
+                    "function": {
+                        "name": "record_lesson",
+                        "arguments": json.dumps({
+                            "request_id": key(),
+                            "goal_id": self.goal_id,
+                            "title": "Runtime booking lesson",
+                            "text": "Use the original booking record before calculating cancellations.",
+                            "sources": [{"kind": "artifact", "source_id": self.source_id}],
+                            "applies_when": "A later goal reuses booking evidence.",
+                            "invalid_when": "The booking schema changes.",
+                        }),
+                    },
+                },
+                {
+                    "id": "retrieve-personal-lesson",
+                    "type": "function",
+                    "function": {
+                        "name": "retrieve_lessons",
+                        "arguments": json.dumps({
+                            "request_id": key(),
+                            "target_goal_id": self.goal_id,
+                            "query": "booking",
+                        }),
+                    },
+                },
+            ],
+        }
+
+
+def test_runtime_member_can_record_and_retrieve_owned_lessons(tmp_path):
+    model = MemberToolCallingModel()
     selected_app = create_app(
-        model=CompletedModel(), sandbox=Sandbox(), state_dir=tmp_path, bootstrap=bootstrap,
+        model=model, sandbox=Sandbox(), state_dir=tmp_path, bootstrap=bootstrap,
+        operator_token=OPERATOR, schedule=False,
+    )
+    with TestClient(selected_app) as client:
+        base, lead, _, tokens = setup_team(client)
+        token = tokens[lead["member_id"]]
+        assignment = send(client, base, OPERATOR, request_id=key(), text="Member lesson goal", kind="assignment")
+        goal = ok(client.post(
+            f"{base}/goals",
+            headers=auth(token),
+            json={"request_id": key(), "source_message_id": assignment["message_id"]},
+        ))["goal_id"]
+        source = publish(client, base.rsplit("/", 1)[-1], lead, [lead], b"runtime booking evidence")
+        model.goal_id = goal
+        model.source_id = source["version_id"]
+        turn_id = ok(client.post(
+            f"/v1/sessions/{lead['session_id']}/turns",
+            headers=auth(token),
+            json={"text": "Use the personal experience tools."},
+        ))["turn_id"]
+        turn = wait_for(lambda: (lambda item: item if item["status"] == "completed" else None)(ok(
+            client.get(f"/v1/sessions/{lead['session_id']}/turns/{turn_id}", headers=auth(token)),
+        )))
+        assert turn["status"] == "completed"
+        assert {
+            "record_lesson", "retrieve_lessons", "read_lesson", "read_handoff", "handoff_lessons",
+            "record_lesson_use", "observe_lesson", "get_experience",
+        } <= model.tool_names
+        assert model.tool_results is not None and all(result["ok"] for result in model.tool_results)
+        lesson_id = model.tool_results[0]["result"]["lesson_id"]
+        assert [item["id"] for item in model.tool_results[1]["result"]["lessons"]] == [lesson_id]
+
+
+class ToolCallingModel:
+    def __init__(self):
+        self.fork_tools = None
+        self.tool_results = None
+        self.lesson_id = None
+        self.handoff_id = None
+        self.target_goal_id = None
+
+    async def complete(self, messages, tools):
+        if "restricted assistant" not in messages[0]["content"]:
+            return {"role": "assistant", "content": "anchor complete"}
+        if messages[-1]["role"] == "tool":
+            self.tool_results = [
+                json.loads(message["content"]) for message in messages if message["role"] == "tool"
+            ]
+            return {"role": "assistant", "content": "used the handed-off experience"}
+        self.fork_tools = {item["function"]["name"] for item in tools}
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "retrieve-lesson",
+                    "type": "function",
+                    "function": {
+                        "name": "retrieve_lessons",
+                        "arguments": json.dumps({
+                            "request_id": key(),
+                            "target_goal_id": self.target_goal_id,
+                            "query": "booking",
+                        }),
+                    },
+                },
+                {
+                    "id": "read-lesson",
+                    "type": "function",
+                    "function": {
+                        "name": "read_lesson",
+                        "arguments": json.dumps({
+                            "lesson_id": self.lesson_id,
+                            "target_goal_id": self.target_goal_id,
+                        }),
+                    },
+                },
+                {
+                    "id": "read-handoff",
+                    "type": "function",
+                    "function": {
+                        "name": "read_handoff",
+                        "arguments": json.dumps({"handoff_id": self.handoff_id}),
+                    },
+                },
+            ],
+        }
+
+
+def test_runtime_fork_uses_experience_tools_and_loses_access_on_revoke(tmp_path):
+    model = ToolCallingModel()
+    selected_app = create_app(
+        model=model, sandbox=Sandbox(), state_dir=tmp_path, bootstrap=bootstrap,
         operator_token=OPERATOR, schedule=False,
     )
     with TestClient(selected_app) as client:
@@ -664,7 +787,6 @@ def test_authorized_assistant_uses_handoff_inside_active_fork_and_loses_access_o
         second = second_goal(client, base, lead, tokens[lead["member_id"]])
         author, outsider = others[0], others[2]
         author_token = tokens[author["member_id"]]
-        install(client, assistant_read_tools={"read_file"})
         source = publish(client, base.rsplit("/", 1)[-1], author, [author], b"assistant source")
         lesson_id = ok(client.post(
             f"{base}/lessons",
@@ -672,7 +794,7 @@ def test_authorized_assistant_uses_handoff_inside_active_fork_and_loses_access_o
             json=record(first, source),
         ))["lesson_id"]
 
-        activate_goal(client, second)
+        activate_goal(client, base, tokens[lead["member_id"]], first, second)
         turn_id = ok(client.post(
             f"/v1/sessions/{author['session_id']}/turns",
             headers=auth(author_token),
@@ -693,7 +815,7 @@ def test_authorized_assistant_uses_handoff_inside_active_fork_and_loses_access_o
                 "scope_id": key(),
                 "history_turn_ids": [turn_id],
                 "version_ids": [source["version_id"]],
-                "allowed_tools": ["read_file"],
+                "allowed_tools": ["retrieve_lessons", "read_lesson", "read_handoff"],
                 "contact_session_ids": [],
             },
         ))
@@ -711,33 +833,36 @@ def test_authorized_assistant_uses_handoff_inside_active_fork_and_loses_access_o
                 "purpose": "Assistant may retrieve this lesson in the bounded second-goal fork.",
             },
         ))
+        model.lesson_id = lesson_id
+        model.handoff_id = handoff["handoff_id"]
+        model.target_goal_id = second
+        runtime = client.app.state.runtime
+        scheduler = DeliveryScheduler(runtime, client.app.state.collaboration, client.app.state.workspace)
+
+        async def run_fork():
+            claim = scheduler._claim_assistant()
+            assert claim and claim[0] == helper
+            runtime.launch(*claim)
+            await runtime.active[helper].task
+
+        client.portal.call(run_fork)
+        assert model.fork_tools == {"retrieve_lessons", "read_lesson", "read_handoff"}
+        assert model.tool_results is not None and all(result["ok"] for result in model.tool_results)
+        assert [item["id"] for item in model.tool_results[0]["result"]["lessons"]] == [lesson_id]
+        assert model.tool_results[1]["result"]["id"] == lesson_id
+        assert model.tool_results[2]["result"]["artifact_version_ids"] == [source["version_id"]]
+        turn = client.portal.call(lambda: dict(runtime.db.execute(
+            "SELECT status FROM turns WHERE role = ? ORDER BY rowid DESC LIMIT 1", (helper,),
+        ).fetchone()))
+        assert turn["status"] == "completed"
+
         tools = client.app.state.experience_tools
         names = {item["function"]["name"] for item in client.portal.call(tools.tools_for, helper)}
         assert names == {"retrieve_lessons", "read_lesson", "read_handoff"}
+
         def execute(*args):
             return client.portal.call(tools.execute, *args)
 
-        assert not execute(helper, "record_lesson", json.dumps(record(
-            first, source,
-        )))["ok"]
-        result = execute(helper, "retrieve_lessons", json.dumps({
-            "request_id": key(), "target_goal_id": second, "query": "original booking",
-        }))
-        assert result["ok"], result
-        assert [item["id"] for item in result["result"]["lessons"]] == [lesson_id]
-        direct = execute(helper, "read_lesson", json.dumps({
-            "lesson_id": lesson_id, "target_goal_id": second,
-        }))
-        assert direct["ok"]
-        assert direct["result"]["id"] == lesson_id
-        handoff_result = execute(helper, "read_handoff", json.dumps({
-            "handoff_id": handoff["handoff_id"],
-        }))
-        assert handoff_result["ok"], handoff_result
-        assert handoff_result["result"]["artifact_version_ids"] == [source["version_id"]]
-        assert execute(helper, "retrieve_lessons", json.dumps({
-            "request_id": key(), "target_goal_id": first, "query": "",
-        }))["status"] == 404
         outsider_result = execute(
             outsider["session_id"], "retrieve_lessons",
             json.dumps({"request_id": key(), "target_goal_id": second, "query": ""}),
@@ -749,9 +874,17 @@ def test_authorized_assistant_uses_handoff_inside_active_fork_and_loses_access_o
             headers=auth(author_token),
             json={"request_id": key()},
         ))
-        assert not execute(helper, "retrieve_lessons", json.dumps({
+        assert client.portal.call(tools.tools_for, helper) == []
+        assert execute(helper, "retrieve_lessons", json.dumps({
             "request_id": key(), "target_goal_id": second, "query": "",
-        }))["ok"]
-        assert not execute(helper, "read_handoff", json.dumps({
+        }))["status"] == 403
+        assert execute(helper, "read_handoff", json.dumps({
             "handoff_id": handoff["handoff_id"],
-        }))["ok"]
+        }))["status"] == 403
+        after = client.post(
+            f"/v1/forks/{helper}/messages",
+            headers=auth(author_token),
+            json={"request_id": key(), "text": "continue after revoke"},
+        )
+        assert after.status_code in (403, 404, 409)
+        assert client.portal.call(scheduler._claim_assistant) is None

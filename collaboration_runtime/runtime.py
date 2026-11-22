@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .collaboration import CollaborationInvalid
 from .delegation_tools import TOOLS as DELEGATION_TOOLS
+from .experience import ExperienceTools
 from .journal import ExecutionJournal
 from .model import ModelError
 from .sandbox import SandboxError
@@ -81,7 +82,7 @@ REPLAYABLE_TOOLS = {
     "get_git_action", "request_push",
     "fork_session", "send_fork_message", "decide_fork_result",
     "get_goal", "update_goal_acceptance", "close_goal", "activate_goal",
-} | DELEGATION_TOOLS.keys()
+} | DELEGATION_TOOLS.keys() | ExperienceTools.MEMBER_TOOLS.keys()
 
 DELIVERY_PROMPT = (
     "\n\nThe host provides an authenticated delivery as JSON in the current input. "
@@ -108,6 +109,7 @@ class Runtime:
         self.collaboration = None
         self.forks = None
         self.fork_messages = None
+        self.experience_tools = None
         self.git_approvals = None
         self.db = sqlite3.connect(database)
         self.db.row_factory = sqlite3.Row
@@ -333,6 +335,8 @@ class Runtime:
                 tools = self.workspace_tools.tools_for(role) if workspace_id is not None else TOOLS
                 if workspace_id is not None and self.collaboration is not None:
                     tools.extend(self.collaboration.tools_for(role))
+                if workspace_id is not None and self.experience_tools is not None:
+                    tools.extend(self.experience_tools.tools_for(role))
                 if workspace_id is not None and self.git_approvals is not None:
                     tools.extend(self.git_approvals.tools_for(role, scheduled))
                 if workspace_id is not None and self.forks is not None:
@@ -450,6 +454,8 @@ class Runtime:
                 return self.fork_messages.execute(role, name, arguments)
         if workspace_id is not None and self.git_approvals is not None and self.git_approvals.handles(name):
             return await self.git_approvals.execute(role, turn.id, turn.generation, call_id, name, arguments)
+        if workspace_id is not None and self.experience_tools is not None and self.experience_tools.handles(name):
+            return self.experience_tools.execute(role, name, arguments)
         if workspace_id is not None and self.collaboration is not None and self.collaboration.handles(name):
             work = None
             if scheduled and name == "ask_human":

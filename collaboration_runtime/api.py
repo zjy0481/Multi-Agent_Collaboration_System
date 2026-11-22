@@ -24,6 +24,7 @@ from .delegation import (
     ProposalVersionInput,
 )
 from .delegation_tools import DelegationTools
+from .experience import ExperienceService, ExperienceTools, build_router
 from .fork_messages import ForkDecisionInput, ForkMessageInput, ForkMessages
 from .forks import ForkHandoffInput, ForkInput, ForkService
 from .task_results import ReviewResultInput, SubmitResultInput
@@ -105,7 +106,7 @@ async def _authenticated(request: Request, response: Response, token: Credential
     actor = request.app.state.auth.resolve(token)
     if actor is None:
         raise HTTPException(status_code=401, detail="A valid local credential is required",
-                            headers={"WWW-Authenticate": "Bearer"})
+                            headers={"WWW-Authenticate": "Bearer", "Cache-Control": "no-store"})
     return actor
 
 
@@ -182,6 +183,9 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             forks = ForkService(runtime, collaboration, workspace, delegation)
             runtime.forks = forks
             runtime.fork_messages = ForkMessages(forks, collaboration, runtime)
+            experience = ExperienceService(collaboration, workspace, forks)
+            experience_tools = ExperienceTools(experience, auth, workspace)
+            runtime.experience_tools = experience_tools
             goal_lifecycle = GoalLifecycle(
                 collaboration, delegation, runtime, goal_timeout_seconds=configured_goal_timeout,
             )
@@ -195,6 +199,8 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             app.state.auth = auth
             app.state.collaboration = collaboration
             app.state.delegation = delegation
+            app.state.experience = experience
+            app.state.experience_tools = experience_tools
             app.state.goal_lifecycle = goal_lifecycle
             target_directory = git_targets_dir or os.environ.get("COLLABORATION_GIT_TARGETS_DIR")
             executor = git_executor
@@ -222,6 +228,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
                 await selected_model.aclose()
 
     app = FastAPI(title="Course collaboration runtime", lifespan=lifespan, dependencies=[Depends(_local_operator)])
+    app.include_router(build_router(_authenticated))
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

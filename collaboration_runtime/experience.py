@@ -2,10 +2,10 @@
 
 This module is deliberately self-contained.  It reads team membership, goals,
 artifact ACLs and assistant forks through the existing services, but owns its
-queries, receipts, HTTP router factory and model-tool adapter.  A production
-assembly must set ``app.state.experience`` and call :func:`build_router` with
-the application's existing authentication dependency at the documented
-integration point.
+queries, receipts, HTTP router factory and model-tool adapter.  ``create_app``
+constructs the service, registers :func:`build_router` with the application's
+existing authentication dependency, and exposes the model tools through
+``Runtime``.
 """
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ from .collaboration import (
 )
 from .local_auth import Principal
 from .teams import TeamConflict, TeamNotFound
-from .workspace import WorkspaceNotFound
+from .workspace import ASSISTANT_EXPERIENCE_TOOLS, WorkspaceNotFound
 
 
 SourceList = Annotated[list["LessonSource"], Field(min_length=1, max_length=32)]
@@ -141,7 +141,7 @@ class ExperienceService:
     """
 
     def __init__(self, collaboration, workspace, forks=None, *,
-                 assistant_read_tools=frozenset({"retrieve_lessons"})):
+                 assistant_read_tools=ASSISTANT_EXPERIENCE_TOOLS):
         self.collaboration = collaboration
         self.workspace = workspace
         self.forks = forks
@@ -1039,18 +1039,21 @@ class ExperienceTools:
             fork = self.service.forks.require_active(session_id)
         except (WorkspaceNotFound, TeamConflict, TeamNotFound):
             return None
-        if not set(self.service.assistant_read_tools).intersection(fork["allowed_tools"]):
-            return None
         return actor, fork
 
     def tools_for(self, session_id):
         member = self._member(session_id)
         if member is not None:
             available = self.MEMBER_TOOLS
-        elif self._assistant(session_id) is not None:
-            available = self.READ_TOOLS
         else:
-            return []
+            assistant = self._assistant(session_id)
+            if assistant is None:
+                return []
+            _, fork = assistant
+            available = {
+                name: item for name, item in self.READ_TOOLS.items()
+                if name in self.service.assistant_read_tools and name in fork["allowed_tools"]
+            }
         return [
             {
                 "type": "function",
@@ -1068,9 +1071,15 @@ class ExperienceTools:
             return {"ok": False, "error": "Unknown experience tool", "status": 422}
         member = self._member(session_id)
         if member is None:
-            if name not in self.READ_TOOLS or self._assistant(session_id) is None:
+            assistant = self._assistant(session_id)
+            if (
+                assistant is None
+                or name not in self.READ_TOOLS
+                or name not in self.service.assistant_read_tools
+                or name not in assistant[1]["allowed_tools"]
+            ):
                 return {"ok": False, "error": "This execution identity cannot use the experience tool", "status": 403}
-            actor = self.workspace.actor(session_id)
+            actor = assistant[0]
         else:
             actor = member
         try:
@@ -1131,23 +1140,27 @@ class ExperienceTools:
 def _service(request: Request) -> ExperienceService:
     service = getattr(request.app.state, "experience", None)
     if service is None:
-        raise HTTPException(status_code=503, detail="Personal experience service is not assembled")
+        raise HTTPException(
+            status_code=503, detail="Personal experience service is not assembled",
+            headers={"Cache-Control": "no-store"},
+        )
     return service
 
 
 def _error(exc):
+    headers = {"Cache-Control": "no-store"}
     if isinstance(exc, ExperienceConflict):
-        return HTTPException(status_code=409, detail=str(exc))
+        return HTTPException(status_code=409, detail=str(exc), headers=headers)
     if isinstance(exc, TeamConflict):
-        return HTTPException(status_code=409, detail=str(exc))
+        return HTTPException(status_code=409, detail=str(exc), headers=headers)
     if isinstance(exc, CollaborationForbidden):
-        return HTTPException(status_code=403, detail=str(exc))
+        return HTTPException(status_code=403, detail=str(exc), headers=headers)
     if isinstance(exc, CollaborationInvalid):
-        return HTTPException(status_code=422, detail=str(exc))
+        return HTTPException(status_code=422, detail=str(exc), headers=headers)
     if isinstance(exc, (TeamNotFound, ArtifactNotFound)):
-        return HTTPException(status_code=404, detail=str(exc))
+        return HTTPException(status_code=404, detail=str(exc), headers=headers)
     if isinstance(exc, ArtifactError):
-        return HTTPException(status_code=404, detail=str(exc))
+        return HTTPException(status_code=404, detail=str(exc), headers=headers)
     return exc
 
 
@@ -1157,7 +1170,10 @@ def build_router(authenticated):
 
     async def member_actor(actor: Principal = Depends(authenticated)) -> Principal:
         if actor.is_operator or actor.session_id is None:
-            raise HTTPException(status_code=403, detail="This action requires a team member")
+            raise HTTPException(
+                status_code=403, detail="This action requires a team member",
+                headers={"Cache-Control": "no-store"},
+            )
         return actor
 
     @api_router.post("/v1/teams/{team_id}/lessons", status_code=201)
