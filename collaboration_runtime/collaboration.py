@@ -393,18 +393,23 @@ class CollaborationService:
         delivery["answer_message_ids"] = [row["answer_message_id"] for row in answers]
 
     def fork_message_for_delivery(self, delivery):
-        while delivery["purpose"] == "clarification.resume":
+        while delivery["purpose"] in {"clarification.resume", "clarification.correction"}:
             delivery = self.db.execute("""
                 SELECT work.event_id, work.message_id, work.session_id, work.purpose
-                FROM team_messages answer JOIN human_questions q
-                    ON q.question_id = answer.reply_to AND q.answer_message_id = answer.id
+                FROM team_messages message
+                LEFT JOIN clarification_corrections correction ON correction.message_id = message.id
+                JOIN human_questions q ON q.question_id = CASE
+                    WHEN :purpose = 'clarification.correction' THEN correction.question_id
+                    ELSE message.reply_to END
                 JOIN message_deliveries work ON work.event_id = q.work_event_id
                     AND work.session_id = q.session_id AND work.purpose = q.work_purpose
                     AND work.message_id = q.source_message_id
-                WHERE answer.id = ? AND work.session_id = ? AND work.event_id < ?
-            """, (delivery["message_id"], delivery["session_id"], delivery["event_id"])).fetchone()
+                WHERE message.id = :message_id AND work.event_id < :event_id AND q.answer_message_id IS NOT NULL
+                    AND (:purpose = 'clarification.correction'
+                         OR (q.answer_message_id = message.id AND work.session_id = :session_id))
+            """, {key: delivery[key] for key in ("message_id", "session_id", "event_id", "purpose")}).fetchone()
             if delivery is None:
-                raise CollaborationInvalid("The continuation has no recorded source delivery")
+                raise CollaborationInvalid("The clarification has no recorded source delivery")
         if delivery["purpose"] == "fork.message":
             return delivery["message_id"]
 

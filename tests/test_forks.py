@@ -12,6 +12,7 @@ from collaboration_runtime.api import create_app
 from collaboration_runtime.fork_messages import ForkMessageInput
 from collaboration_runtime.local_auth import OPERATOR_ID
 from collaboration_runtime.scheduler import DeliveryScheduler
+from test_clarifications import ask
 from test_collaboration import OPERATOR, Sandbox, auth, bootstrap, send, snapshot
 from test_delegation import action, confirm_all, context, create, ok, terms
 from test_scheduler import tool
@@ -386,6 +387,92 @@ def test_persisted_fork_clarification_checks_scope_at_execution_boundaries(fork_
     """, (answer["message_id"],)).fetchone()))
     assert delivery == ("interrupted" if boundary in {"claimed", "model-result"} else "failed")
     assert turn == ("interrupted" if boundary in {"recoverable", "claimed", "model-result"} else None)
+
+
+@pytest.mark.parametrize("condition", ["valid", "revoked", "revoked-recovery", "material-unavailable", "broken-link"])
+def test_persisted_fork_corrections_keep_original_scope(fork_delivery, condition):
+    (client, runtime, scheduler, model, drain, base, lead_token, contact, tokens,
+     _, _, _, helper, artifact, newer) = fork_delivery
+    original = post_fork_delivery(client, runtime, helper, contact, artifact["version_id"])
+    question_id = seed_persisted_fork_question(client, runtime, contact, original)
+    answer = send(client, base, OPERATOR, request_id=uuid4().hex, text="Answer", reply_to=question_id)
+    client.portal.call(drain, scheduler._claim_one)
+    model.inputs.clear()
+
+    first = send(client, base, OPERATOR, request_id=uuid4().hex, text="First correction", reply_to=answer["message_id"])
+    client.portal.call(drain, scheduler._claim_one)
+    first_input, = map(json.loads, model.inputs)
+    assert first_input["message"]["id"] == first["message_id"]
+    model.inputs.clear()
+
+    def revoke():
+        ok(client.post(f"/v1/forks/{helper}/revoke", headers=auth(lead_token), json={"request_id": uuid4().hex}))
+
+    def persist(sql, value):
+        with runtime.db:
+            runtime.db.execute(sql, (value,))
+
+    if condition == "revoked":
+        revoke()
+    second = send(client, base, OPERATOR, request_id=uuid4().hex, text="Second correction", reply_to=first["message_id"])
+    correction_id = second["message_id"]
+    if condition == "revoked-recovery":
+        claim = client.portal.call(scheduler._claim_one)
+        assert claim and claim[0] == contact["session_id"]
+        client.portal.call(lambda: runtime._finish(claim[1], "recoverable", error="fixture restart"))
+        revoke()
+    elif condition == "material-unavailable":
+        client.portal.call(persist, "UPDATE artifact_versions SET reader_session_ids = '[]' WHERE version_id = ?",
+                           artifact["version_id"])
+    elif condition == "broken-link":
+        client.portal.call(persist, "DELETE FROM clarification_corrections WHERE message_id = ?", correction_id)
+
+    client.portal.call(drain, scheduler._claim_one)
+    if condition == "valid":
+        second_input, = map(json.loads, model.inputs)
+        assert second_input["message"]["id"] == correction_id
+        for payload in (first_input, second_input):
+            assert payload["fork_message"] == {"id": original["message_id"], "version_ids": [artifact["version_id"]]}
+            assert newer["version_id"] not in json.dumps(payload)
+    else:
+        assert not model.inputs
+
+    for token in (OPERATOR, tokens[contact["member_id"]]):
+        assert ok(client.get(f"{base}/messages/{correction_id}", headers=auth(token)))["text"] == "Second correction"
+    for member_id, token in tokens.items():
+        if member_id != contact["member_id"]:
+            assert client.get(f"{base}/messages/{correction_id}", headers=auth(token)).status_code == 404
+    deliveries = client.portal.call(lambda: [tuple(row) for row in runtime.db.execute("""
+        SELECT d.session_id, d.status, t.status FROM message_deliveries d
+        LEFT JOIN scheduled_turns s USING (event_id, session_id, purpose)
+        LEFT JOIN turns t ON t.id = s.turn_id
+        WHERE d.message_id = ? AND d.purpose = 'clarification.correction'
+    """, (correction_id,))])
+    expected = ("completed", "completed") if condition == "valid" else (
+        "failed", "interrupted" if condition == "revoked-recovery" else None)
+    assert deliveries == [(contact["session_id"], *expected)]
+
+
+def test_ordinary_group_correction_runs_for_original_asker_and_citing_member(fork_delivery):
+    (client, runtime, scheduler, model, drain, base, lead_token, contact, _,
+     _, _, _, _, _, _) = fork_delivery
+    lead = client.portal.call(runtime.collaboration.auth.resolve, lead_token)
+    work = send(client, base, OPERATOR, request_id=uuid4().hex, text="Group work", mentions=[contact["member_id"]])
+    question = ask(client, contact, uuid4().hex, work["message_id"], "Group clarification")
+    answer = send(client, base, OPERATOR, request_id=uuid4().hex, text="Group answer",
+                  reply_to=question["question"]["question_id"])
+    send(client, base, lead_token, request_id=uuid4().hex, text="Citing the group answer", reply_to=answer["message_id"])
+    first = send(client, base, OPERATOR, request_id=uuid4().hex, text="Group correction", reply_to=answer["message_id"])
+    second = send(client, base, OPERATOR, request_id=uuid4().hex, text="Corrected again", reply_to=first["message_id"])
+    client.portal.call(drain, scheduler._claim_one)
+
+    correction_inputs = [payload for payload in map(json.loads, model.inputs)
+                         if payload["delivery"]["purpose"] == "clarification.correction"]
+    for correction in (first, second):
+        recipients = [payload["delivery"]["session_id"] for payload in correction_inputs
+                      if payload["message"]["id"] == correction["message_id"]]
+        assert sorted(recipients) == sorted([contact["session_id"], lead.session_id])
+    assert all("fork_message" not in payload for payload in correction_inputs)
 
 
 def test_fork_history_authorization_parallel_replay_and_revocation(tmp_path):
