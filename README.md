@@ -56,6 +56,19 @@ $team.members | Select-Object role_id, name, session_id, workspace_id
 2. 同一工作还有其他问题待答时继续阻塞。最后一条有效答复产生一条 `clarification.resume` 待办，包含原工作消息 ID 和相关答复 ID。已答问题如需变更，可引用原答复发送更正，提问者和引用了该决定的正式成员会收到通知。
 3. 发起提问的模型回合以 `waiting_human` 释放会话执行槽。问题和待办保存在 SQLite，重启后可用原引用答复。T003 可通过 `GET /v1/teams/{team_id}/deliveries` 核对恢复投递，待办自动领取和启动模型回合由 T006 接入。
 
+## T004 委托协商与任务修订
+
+正式成员可以在有权访问的活动目标内发起委托。模型先用 `list_delegation` 查看活动目标与可见的草案、任务，再用 `create_proposal` 提出条款。首次协商使用独立的 `scope_id`，基于现有任务的修订指定 `task_id` 和 `base_revision`。条款包含交付物、验收条件、负责人和主审，也可指定额外承诺方、输入版本、父任务和前置任务。涉及负责人或主审变更时，受影响的原角色和新角色均需确认。
+
+- `POST /v1/teams/{team_id}/proposals` 创建草案。`POST /v1/proposals/{proposal_id}/counter` 替换条款并生成新版本。新版本重新收集确认，旧记录可通过 `GET /v1/proposals/{proposal_id}?version=N` 查询。
+- 承诺方通过 `/confirm` 确认当前版本，也可通过 `/reject` 拒绝。当前版本的提出方可通过 `/withdraw` 撤回。拒绝和撤回保留原因，重新发起首次协商时使用新的 `scope_id`。
+- 全部承诺方确认后，由获授权正式成员通过 `/assign` 或 `/update` 登记。各写入携带 `request_id`，草案操作携带 `expected_version`。同版登记重放返回原回执。基础修订改变时返回 `409`，对可读的版本提供条款差异。向 `/counter` 提交当前 `base_revision` 和重议条款可继续协商。
+- `GET /v1/teams/{team_id}/tasks/{task_id}?revision=N` 查询有效任务及历史修订。登记产生可见的 `task.assigned` 或 `task.updated` 事件和定向通知，群进展仅展示公开状态。助手凭由宿主授权的协商范围和工具提交草案，确认与登记由正式成员完成。
+
+完整请求结构见本机的[接口文档](http://127.0.0.1:8000/docs)。可运行 `python -m pytest -q tests/test_delegation.py` 复验协商、权限、重放、依赖与通知。
+
+用现有 HKGAI 模型 `t2_hkgai-v3_fp8_1m_e7` 联调时，Lead 读取活动目标、创建草案、登记任务并更新至修订 2，负责人通过模型确认草案。其余确认由测试通过同一 HTTP 接口提交。四个模型回合均完成，五次工具回执均匹配原调用 ID。设置 `RUN_LIVE_DELEGATION_TESTS=1` 后可运行 `python -m pytest -q -s tests/test_delegation_live.py`；隔离工作树可用 `DELEGATION_COURSE_ENV_FILE` 指向已有课程配置文件。
+
 ## T005 私有工作区与产物交接
 
 对已导入团队的正式成员发起回合。成员可以调用 `create_file`、`read_file`、`update_file`、`delete_file` 操作自己的工作区，并通过 `run_command` 执行代码和测试。工作区文件使用相对路径，发布或文件写入单次上限为 1 MiB。

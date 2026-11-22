@@ -17,6 +17,11 @@ from typing import Annotated
 
 from .artifacts import ArtifactError, ArtifactNotFound
 from .collaboration import CollaborationForbidden, CollaborationInvalid, CollaborationService, GoalInput, MessageInput
+from .delegation import (
+    CounterProposalInput, CreateProposalInput, DelegationConflict, DelegationService, ProposalReasonInput,
+    ProposalVersionInput,
+)
+from .delegation_tools import DelegationTools
 from .git_approvals import ApprovalInput, GitApprovals
 from .git_executor import GitExecutor
 from .local_auth import LocalAuth, Principal, SESSION_COOKIE, operator_credential
@@ -133,6 +138,9 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             collaboration = CollaborationService(runtime.db, teams, auth)
             selected_search = search if search is not None else SearchClient.from_env()
             workspace = WorkspaceService(runtime.db, teams, selected_sandbox, state / "team-artifacts", selected_search)
+            delegation = DelegationService(collaboration, workspace)
+            collaboration.delegation = delegation
+            collaboration.delegation_tools = DelegationTools(delegation, auth, workspace)
             runtime.workspace_tools = workspace
             runtime.collaboration = collaboration
             app.state.runtime = runtime
@@ -140,6 +148,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             app.state.workspace = workspace
             app.state.auth = auth
             app.state.collaboration = collaboration
+            app.state.delegation = delegation
             target_directory = git_targets_dir or os.environ.get("COLLABORATION_GIT_TARGETS_DIR")
             executor = git_executor
             if executor is None and target_directory:
@@ -192,6 +201,10 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @app.exception_handler(TeamConflict)
     async def team_conflict(_request, exc):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(DelegationConflict)
+    async def delegation_conflict(_request, exc):
+        return JSONResponse(status_code=409, content={"detail": {"message": str(exc), **exc.details}})
 
     @app.exception_handler(TeamNotFound)
     async def team_not_found(_request, exc):
@@ -250,6 +263,50 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @app.post("/v1/teams/{team_id}/goals", status_code=201)
     async def register_goal(team_id: str, body: GoalInput, actor: Identity):
         return app.state.collaboration.register_goal(team_id, actor, body)
+
+    @app.post("/v1/teams/{team_id}/proposals", status_code=201)
+    async def create_proposal(team_id: str, body: CreateProposalInput, actor: Identity):
+        return app.state.delegation.command(team_id, actor, "create_proposal", body)
+
+    @app.get("/v1/proposals/{proposal_id}")
+    async def get_proposal(proposal_id: str, actor: Identity, version: Annotated[int | None, Query(ge=1)] = None):
+        service = app.state.delegation
+        try:
+            return service.get_proposal(service.proposal_team(proposal_id), actor, proposal_id, version)
+        except TeamNotFound as exc:
+            raise TeamNotFound("Proposal not found") from exc
+
+    def proposal_command(proposal_id, actor, operation, body):
+        service = app.state.delegation
+        return service.command(service.proposal_team(proposal_id), actor, operation, body, proposal_id=proposal_id)
+
+    @app.post("/v1/proposals/{proposal_id}/counter")
+    async def counter_proposal(proposal_id: str, body: CounterProposalInput, actor: Identity):
+        return proposal_command(proposal_id, actor, "counter_proposal", body)
+
+    @app.post("/v1/proposals/{proposal_id}/confirm")
+    async def confirm_proposal(proposal_id: str, body: ProposalVersionInput, actor: Identity):
+        return proposal_command(proposal_id, actor, "confirm_proposal", body)
+
+    @app.post("/v1/proposals/{proposal_id}/reject")
+    async def reject_proposal(proposal_id: str, body: ProposalReasonInput, actor: Identity):
+        return proposal_command(proposal_id, actor, "reject_proposal", body)
+
+    @app.post("/v1/proposals/{proposal_id}/withdraw")
+    async def withdraw_proposal(proposal_id: str, body: ProposalReasonInput, actor: Identity):
+        return proposal_command(proposal_id, actor, "withdraw_proposal", body)
+
+    @app.post("/v1/proposals/{proposal_id}/assign", status_code=201)
+    async def assign_task(proposal_id: str, body: ProposalVersionInput, actor: Identity):
+        return proposal_command(proposal_id, actor, "assign_task", body)
+
+    @app.post("/v1/proposals/{proposal_id}/update")
+    async def update_task(proposal_id: str, body: ProposalVersionInput, actor: Identity):
+        return proposal_command(proposal_id, actor, "update_task", body)
+
+    @app.get("/v1/teams/{team_id}/tasks/{task_id}")
+    async def get_task(team_id: str, task_id: str, actor: Identity, revision: Annotated[int | None, Query(ge=1)] = None):
+        return app.state.delegation.get_task(team_id, actor, task_id, revision)
 
     @app.get("/v1/teams/{team_id}/snapshot")
     async def team_snapshot(team_id: str, actor: Identity):

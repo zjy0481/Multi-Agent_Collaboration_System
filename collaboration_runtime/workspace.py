@@ -34,6 +34,9 @@ class Actor:
     allowed_tools: tuple[str, ...] = ()
 
 
+ASSISTANT_DRAFT_TOOLS = frozenset({"create_proposal", "counter_proposal"})
+
+
 class ToolArgs(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -143,7 +146,7 @@ class WorkspaceService:
             raise WorkspaceNotFound("Parent or assistant identity is unavailable")
         if UUID(session_id).hex != session_id or not scope_id.strip() or not prompt.strip():
             raise ValueError("A stable assistant ID, scope and prompt are required")
-        if not set(allowed_tools) <= TOOLS.keys():
+        if not set(allowed_tools) <= TOOLS.keys() | ASSISTANT_DRAFT_TOOLS:
             raise ValueError("Assistant tools must be registered workspace tools")
         for version_id in version_ids:
             self.artifacts.resolve(parent.team_id, parent.session_id, version_id)

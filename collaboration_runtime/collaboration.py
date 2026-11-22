@@ -76,6 +76,8 @@ class CollaborationService:
         self.db = db
         self.teams = teams
         self.auth = auth
+        self.delegation = None
+        self.delegation_tools = None
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS collaboration_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -400,6 +402,10 @@ class CollaborationService:
             payload["source_message"] = self.get_message(actor.team_id, actor, delivery["source_message_id"])
             payload["answers"] = [self.get_message(actor.team_id, actor, answer_id)
                                   for answer_id in delivery["answer_message_ids"]]
+        if self.delegation is not None:
+            context = self.delegation.execution_context(message["id"], actor)
+            if context is not None:
+                payload.update(context)
         return payload
 
     def register_goal(self, team_id, actor, body: GoalInput):
@@ -477,10 +483,11 @@ class CollaborationService:
                 SELECT {QUESTION_FIELDS} FROM human_questions q JOIN team_messages m ON m.id = q.question_id
                 WHERE m.team_id = :team AND {READABLE_MESSAGE} ORDER BY m.seq
             """, parameters)]
+            delegation = self.delegation.snapshot(team_id, actor) if self.delegation is not None else {}
             cursor = self.cursor(team_id, actor, self._head(team_id))
         return {"team_id": team_id, "actor_id": actor.id, "lead_id": team["lead_member_id"], "cursor": cursor,
                 "participants": self.participants(team), "messages": messages, "goals": goals,
-                "questions": questions}
+                "questions": questions, **delegation}
 
     def events(self, team_id, actor, after):
         self.team(team_id, actor)
@@ -500,6 +507,11 @@ class CollaborationService:
         visible = []
         for row in rows:
             if row["id"] is None:
+                if self.delegation is not None:
+                    event_type, seq = row["type"], row["event_seq"]
+                    payload = self.delegation.event(team_id, actor, event_type, seq)
+                    if payload is not None:
+                        visible.append((event_type, seq, {"seq": seq, **payload}))
                 continue
             fields = dict(row)
             seq = fields.pop("event_seq")
@@ -525,13 +537,16 @@ class CollaborationService:
         return visible, scanned_through, len(rows) == EVENT_BATCH_SIZE
 
     def tools_for(self, session_id):
+        delegation_tools = self.delegation_tools.tools_for(session_id) if self.delegation_tools is not None else []
         if self.auth.member(session_id) is None:
-            return []
-        return [{"type": "function", "function": {
+            return delegation_tools
+        return delegation_tools + [{"type": "function", "function": {
             "name": name, "description": description, "parameters": schema.model_json_schema(),
         }} for name, (schema, description) in TOOLS.items()]
 
     def execute_tool(self, session_id, name, raw_arguments, *, work_message_id=None):
+        if self.delegation_tools is not None and self.delegation_tools.handles(name):
+            return self.delegation_tools.execute(session_id, name, raw_arguments)
         actor = self.auth.member(session_id)
         if actor is None:
             return {"ok": False, "error": "Collaboration tools require a formal member session"}
@@ -556,9 +571,8 @@ class CollaborationService:
             status = {TeamNotFound: 404, TeamConflict: 409, CollaborationForbidden: 403, CollaborationInvalid: 422}
             return {"ok": False, "error": str(exc), "status": status[type(exc)]}
 
-    @staticmethod
-    def handles(name):
-        return name in TOOLS
+    def handles(self, name):
+        return name in TOOLS or (self.delegation_tools is not None and self.delegation_tools.handles(name))
 
 
 TOOLS = {

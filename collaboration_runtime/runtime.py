@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from .delegation_tools import TOOLS as DELEGATION_TOOLS
 from .journal import ExecutionJournal
 from .model import ModelError
 from .sandbox import SandboxError
@@ -77,7 +78,7 @@ REPLAYABLE_TOOLS = {
     "ask_human", "get_message", "list_participants", "register_goal", "send_message",
     "list_artifacts", "list_workspace_readers", "read_artifact", "read_file", "get_search_result",
     "get_git_action", "request_push",
-}
+} | DELEGATION_TOOLS.keys()
 
 DELIVERY_PROMPT = (
     "\n\nThe host provides an authenticated delivery as JSON in the current input. "
