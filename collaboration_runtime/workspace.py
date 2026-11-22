@@ -35,6 +35,7 @@ class Actor:
 
 
 ASSISTANT_DRAFT_TOOLS = frozenset({"create_proposal", "counter_proposal"})
+ASSISTANT_FORK_TOOLS = frozenset({"send_fork_message"})
 
 
 class ToolArgs(BaseModel):
@@ -98,6 +99,8 @@ class WorkspaceService:
         self.sandbox = sandbox
         self.artifacts = ArtifactStore(db, root)
         self.search = search
+        self.assistant_access = None
+        self.assistant_readers = None
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS assistant_workspaces (
                 session_id TEXT PRIMARY KEY,
@@ -134,46 +137,51 @@ class WorkspaceService:
         parent = self._member_actor(details["parent_session_id"])
         if parent is None or parent.team_id != details["team_id"]:
             raise WorkspaceNotFound("Execution session not found")
+        if self.assistant_access is not None:
+            self.assistant_access(session_id)
         return Actor(**details)
 
-    async def register_assistant(
+    def assistant_details(
         self, *, parent_session_id: str, session_id: str, scope_id: str, prompt: str,
         version_ids: list[str], allowed_tools: list[str],
-    ) -> Actor:
-        """Called by the host when it authorizes a helper execution scope."""
+    ) -> dict:
         parent = self._member_actor(parent_session_id)
         if parent is None or self._member_actor(session_id) is not None:
             raise WorkspaceNotFound("Parent or assistant identity is unavailable")
         if UUID(session_id).hex != session_id or not scope_id.strip() or not prompt.strip():
             raise ValueError("A stable assistant ID, scope and prompt are required")
-        if not set(allowed_tools) <= TOOLS.keys() | ASSISTANT_DRAFT_TOOLS:
+        if not set(allowed_tools) <= TOOLS.keys() | ASSISTANT_DRAFT_TOOLS | ASSISTANT_FORK_TOOLS:
             raise ValueError("Assistant tools must be registered workspace tools")
         for version_id in version_ids:
             self.artifacts.resolve(parent.team_id, parent.session_id, version_id)
-        details = {
+        return {
             "team_id": parent.team_id, "session_id": session_id,
             "workspace_id": f"ws-{uuid5(UUID(session_id), 'assistant-workspace').hex}",
             "prompt": prompt, "parent_session_id": parent_session_id, "scope_id": scope_id,
             "versions": sorted(set(version_ids)), "allowed_tools": sorted(set(allowed_tools)),
         }
+
+    def install_assistant(self, details):
+        session_id = details["session_id"]
         serialized = json.dumps(details, ensure_ascii=False, sort_keys=True)
-        existing = self.db.execute(
-            "SELECT details, enabled FROM assistant_workspaces WHERE session_id = ?", (session_id,),
-        ).fetchone()
-        if existing is not None:
-            if existing["details"] != serialized or not existing["enabled"]:
-                raise WorkspaceConflict("Assistant identity already has a different or revoked scope")
-            return self.actor(session_id)
-        await asyncio.to_thread(self.sandbox.prepare, details["workspace_id"])
-        with self.db:
-            self.db.execute(
-                "INSERT OR IGNORE INTO assistant_workspaces VALUES (?, ?, 1)", (session_id, serialized),
-            )
+        self.db.execute("INSERT OR IGNORE INTO assistant_workspaces VALUES (?, ?, 1)", (session_id, serialized))
         existing = self.db.execute(
             "SELECT details, enabled FROM assistant_workspaces WHERE session_id = ?", (session_id,),
         ).fetchone()
         if existing["details"] != serialized or not existing["enabled"]:
             raise WorkspaceConflict("Assistant identity already has a different or revoked scope")
+
+    async def register_assistant(
+        self, *, parent_session_id: str, session_id: str, scope_id: str, prompt: str,
+        version_ids: list[str], allowed_tools: list[str],
+    ) -> Actor:
+        """Prepare a helper workspace before recording its scope."""
+        details = self.assistant_details(parent_session_id=parent_session_id, session_id=session_id,
+                                         scope_id=scope_id, prompt=prompt, version_ids=version_ids,
+                                         allowed_tools=allowed_tools)
+        await asyncio.to_thread(self.sandbox.prepare, details["workspace_id"])
+        with self.db:
+            self.install_assistant(details)
         return self.actor(session_id)
 
     def revoke_assistant(self, session_id: str):
@@ -228,11 +236,14 @@ class WorkspaceService:
         raise ArtifactNotFound("Artifact version not found")
 
     def _readers(self, actor: Actor) -> list[dict]:
+        allowed = {actor.parent_session_id}
+        if actor.parent_session_id is not None and self.assistant_readers is not None:
+            allowed.update(self.assistant_readers(actor.session_id))
         return [
             {key: member[key] for key in ("session_id", "role_id", "name")}
             for member in self.teams.get(actor.team_id)["members"]
             if member["session_id"] != actor.session_id
-            and (actor.parent_session_id is None or member["session_id"] == actor.parent_session_id)
+            and (actor.parent_session_id is None or member["session_id"] in allowed)
         ]
 
     async def execute(self, session_id: str, name: str, raw_arguments: str) -> dict:
