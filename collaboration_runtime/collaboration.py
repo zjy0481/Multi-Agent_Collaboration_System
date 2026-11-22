@@ -42,6 +42,7 @@ class MessageInput(Command):
 class GoalInput(Command):
     request_id: RequestId
     source_message_id: ObjectId
+    prerequisite_goal_ids: Annotated[list[ObjectId], Field(default_factory=list, max_length=100)]
 
 
 class ReadMessageInput(Command):
@@ -78,6 +79,7 @@ class CollaborationService:
         self.auth = auth
         self.delegation = None
         self.delegation_tools = None
+        self.goal_lifecycle = None
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS collaboration_events (
                 seq INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -127,6 +129,8 @@ class CollaborationService:
                 session_id TEXT NOT NULL,
                 work_purpose TEXT NOT NULL,
                 answer_message_id TEXT UNIQUE REFERENCES team_messages(id),
+                goal_id TEXT,
+                closed_at TEXT,
                 FOREIGN KEY (work_event_id, session_id, work_purpose)
                     REFERENCES message_deliveries(event_id, session_id, purpose)
             );
@@ -146,6 +150,13 @@ class CollaborationService:
                 PRIMARY KEY (team_id, actor_id, operation, request_id)
             );
         """)
+        question_columns = {
+            row["name"] for row in self.db.execute("PRAGMA table_info(human_questions)")
+        }
+        if "goal_id" not in question_columns:
+            self.db.execute("ALTER TABLE human_questions ADD COLUMN goal_id TEXT")
+        if "closed_at" not in question_columns:
+            self.db.execute("ALTER TABLE human_questions ADD COLUMN closed_at TEXT")
 
     def team(self, team_id: str, actor: Principal):
         if not actor.is_operator and actor.team_id != team_id:
@@ -245,10 +256,15 @@ class CollaborationService:
                                           kind="question", mentions=[], reply_to=source["id"])
             question_id = posted["message_id"]
             work_key = (work["event_id"], actor.session_id, work["purpose"])
+            active_goal = self.db.execute("""
+                SELECT id FROM team_goals WHERE team_id = ? AND status = 'active'
+            """, (team_id,)).fetchone()
             self.db.execute("""
-                INSERT INTO human_questions(question_id, asker_id, source_message_id, work_event_id, session_id, work_purpose)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (question_id, actor.id, source["id"], *work_key))
+                INSERT INTO human_questions
+                    (question_id, asker_id, source_message_id, work_event_id, session_id, work_purpose, goal_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (question_id, actor.id, source["id"], *work_key,
+                  active_goal["id"] if active_goal is not None else None))
             self.db.execute("""
                 UPDATE message_deliveries SET status = 'blocked'
                 WHERE event_id = ? AND session_id = ? AND purpose = ?
@@ -269,6 +285,10 @@ class CollaborationService:
             raise TeamConflict("This question already has an answer. Reference the answer to send a correction.")
         self.db.execute("UPDATE human_questions SET answer_message_id = ? WHERE question_id = ?",
                         (answer["message_id"], question["question_id"]))
+        if question["closed_at"] is not None or (
+            self.goal_lifecycle is not None and self.goal_lifecycle.question_scope_ended(question)
+        ):
+            return
         work_key = (question["work_event_id"], question["session_id"], question["work_purpose"])
         still_blocked = self.db.execute("""
             SELECT 1 FROM human_questions
@@ -284,6 +304,10 @@ class CollaborationService:
     def _correct_answer(self, source, question, correction, members):
         self.db.execute("INSERT INTO clarification_corrections VALUES (?, ?)",
                         (correction["message_id"], question["question_id"]))
+        if question["closed_at"] is not None or (
+            self.goal_lifecycle is not None and self.goal_lifecycle.question_scope_ended(question)
+        ):
+            return
         readers = self.db.execute("""
             SELECT DISTINCT sender_id FROM team_messages
             WHERE team_id = ? AND reply_to IN (?, ?)
@@ -431,7 +455,10 @@ class CollaborationService:
 
     def register_goal(self, team_id, actor, body: GoalInput):
         key = (team_id, actor.id, "register_goal", body.request_id)
-        digest = self._digest({"source_message_id": body.source_message_id})
+        digest_payload = {"source_message_id": body.source_message_id}
+        if body.prerequisite_goal_ids:
+            digest_payload["prerequisite_goal_ids"] = sorted(set(body.prerequisite_goal_ids))
+        digest = self._digest(digest_payload)
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             team = self.team(team_id, actor)
@@ -449,15 +476,30 @@ class CollaborationService:
             if row:
                 receipt = dict(row)
             else:
+                terminal = (self.goal_lifecycle.terminal_for_source(team_id, source["id"])
+                            if self.goal_lifecycle is not None else None)
+                if terminal is not None:
+                    raise TeamConflict("The original assignment was terminated before registration")
+                prerequisites = (self.goal_lifecycle.validate_prerequisites(
+                    team_id, actor, body.prerequisite_goal_ids,
+                ) if self.goal_lifecycle is not None else list(dict.fromkeys(body.prerequisite_goal_ids)))
                 active = self.db.execute("SELECT 1 FROM team_goals WHERE team_id = ? AND status = 'active'",
                                          (team_id,)).fetchone()
-                status = "queued" if active else "active"
+                prerequisites_ready = all(
+                    self.db.execute("SELECT status FROM team_goals WHERE id = ?", (goal_id,)).fetchone()["status"]
+                    == "completed"
+                    for goal_id in prerequisites
+                )
+                status = "queued" if active or not prerequisites_ready else "active"
                 goal_id = uuid4().hex
                 seq = self._event(team_id, "goal.registered", goal_id)
                 self.db.execute("""
                     INSERT INTO team_goals(id, team_id, source_message_id, status, revision, seq, created_at)
                     VALUES (?, ?, ?, ?, 1, ?, ?)
                 """, (goal_id, team_id, source["id"], status, seq, _now()))
+                if self.goal_lifecycle is not None:
+                    self.goal_lifecycle.initialize_goal(team_id, goal_id, actor.id)
+                    self.goal_lifecycle.store_prerequisites(goal_id, prerequisites)
                 receipt = {"goal_id": goal_id, "event_id": seq, "status": status, "revision": 1}
             self._save_receipt(key, digest, receipt)
             return receipt
@@ -500,6 +542,8 @@ class CollaborationService:
                 SELECT g.* FROM team_goals g JOIN team_messages m ON m.id = g.source_message_id
                 WHERE g.team_id = :team AND {READABLE_MESSAGE} ORDER BY g.seq
             """, parameters)]
+            if self.goal_lifecycle is not None:
+                goals = [self.goal_lifecycle.enrich_goal(team_id, actor, goal) for goal in goals]
             questions = [dict(row) for row in self.db.execute(f"""
                 SELECT {QUESTION_FIELDS} FROM human_questions q JOIN team_messages m ON m.id = q.question_id
                 WHERE m.team_id = :team AND {READABLE_MESSAGE} ORDER BY m.seq
@@ -520,7 +564,7 @@ class CollaborationService:
             SELECT e.seq AS event_seq, e.type, m.*, g.id AS goal_id, g.status AS goal_status,
                    g.revision AS goal_revision, g.created_at AS goal_created_at, {QUESTION_FIELDS}
             FROM batch e
-            LEFT JOIN team_goals g ON e.type = 'goal.registered' AND g.id = e.object_id
+            LEFT JOIN team_goals g ON e.type LIKE 'goal.%' AND g.id = e.object_id
             LEFT JOIN team_messages m ON m.id = COALESCE(g.source_message_id, e.object_id) AND {READABLE_MESSAGE}
             LEFT JOIN human_questions q ON q.question_id = m.id OR q.answer_message_id = m.id
             ORDER BY e.seq
@@ -552,6 +596,8 @@ class CollaborationService:
             else:
                 goal = {"id": goal_id, "team_id": team_id, "source_message_id": fields["id"], "status": status,
                         "revision": revision, "created_at": created_at, "seq": seq}
+                if self.goal_lifecycle is not None:
+                    goal.update(self.goal_lifecycle.enrich_goal(team_id, actor, goal))
                 data = {"seq": seq, "goal": goal}
             visible.append((event_type, seq, data))
         scanned_through = rows[-1]["event_seq"] if rows else after
@@ -561,13 +607,16 @@ class CollaborationService:
         delegation_tools = self.delegation_tools.tools_for(session_id) if self.delegation_tools is not None else []
         if self.auth.member(session_id) is None:
             return delegation_tools
-        return delegation_tools + [{"type": "function", "function": {
+        goal_tools = self.goal_lifecycle.tools_for(session_id) if self.goal_lifecycle is not None else []
+        return delegation_tools + goal_tools + [{"type": "function", "function": {
             "name": name, "description": description, "parameters": schema.model_json_schema(),
         }} for name, (schema, description) in TOOLS.items()]
 
     def execute_tool(self, session_id, name, raw_arguments, *, work_message_id=None):
         if self.delegation_tools is not None and self.delegation_tools.handles(name):
             return self.delegation_tools.execute(session_id, name, raw_arguments)
+        if self.goal_lifecycle is not None and self.goal_lifecycle.handles(name):
+            return self.goal_lifecycle.execute(session_id, name, raw_arguments)
         actor = self.auth.member(session_id)
         if actor is None:
             return {"ok": False, "error": "Collaboration tools require a formal member session"}
@@ -593,7 +642,8 @@ class CollaborationService:
             return {"ok": False, "error": str(exc), "status": status[type(exc)]}
 
     def handles(self, name):
-        return name in TOOLS or (self.delegation_tools is not None and self.delegation_tools.handles(name))
+        return (name in TOOLS or (self.delegation_tools is not None and self.delegation_tools.handles(name))
+                or (self.goal_lifecycle is not None and self.goal_lifecycle.handles(name)))
 
 
 TOOLS = {
