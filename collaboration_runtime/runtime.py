@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from .collaboration import CollaborationInvalid
 from .delegation_tools import TOOLS as DELEGATION_TOOLS
 from .journal import ExecutionJournal
 from .model import ModelError
@@ -78,6 +79,7 @@ REPLAYABLE_TOOLS = {
     "ask_human", "get_message", "list_participants", "register_goal", "send_message",
     "list_artifacts", "list_workspace_readers", "read_artifact", "read_file", "get_search_result",
     "get_git_action", "request_push",
+    "fork_session", "send_fork_message", "decide_fork_result",
 } | DELEGATION_TOOLS.keys()
 
 DELIVERY_PROMPT = (
@@ -103,6 +105,8 @@ class Runtime:
         self.closing = False
         self.workspace_tools = None
         self.collaboration = None
+        self.forks = None
+        self.fork_messages = None
         self.git_approvals = None
         self.db = sqlite3.connect(database)
         self.db.row_factory = sqlite3.Row
@@ -136,11 +140,15 @@ class Runtime:
             );
         """)
         self.journal = ExecutionJournal(self.db)
+        has_forks = self.db.execute("SELECT 1 FROM sqlite_master WHERE name = 'assistant_jobs'").fetchone()
         for row in self.db.execute("""
             SELECT t.id, s.turn_id AS scheduled FROM turns t
             LEFT JOIN scheduled_turns s ON s.turn_id = t.id WHERE t.status = 'running'
         """).fetchall():
-            status = "recoverable" if row["scheduled"] is not None else "interrupted"
+            assistant = has_forks and self.db.execute(
+                "SELECT 1 FROM assistant_jobs WHERE turn_id = ?", (row["id"],),
+            ).fetchone()
+            status = "recoverable" if row["scheduled"] is not None or assistant else "interrupted"
             self._finish(row["id"], status, error="Server restarted during the turn")
 
     def _event(self, turn_id: str, event_type: str, **payload):
@@ -161,6 +169,9 @@ class Runtime:
                     SELECT event_id, session_id, purpose FROM scheduled_turns WHERE turn_id = ?
                 ) AND status = 'running'
             """, (status, turn_id))
+        if status != "recoverable" and self.forks is not None:
+            self.db.execute("UPDATE assistant_jobs SET status = ? WHERE turn_id = ? AND status = 'running'",
+                            (status, turn_id))
         self._event(turn_id, f"turn.{status}", reply=reply, error=error)
 
     def _finish(self, turn_id: str, status: str, **fields):
@@ -245,20 +256,58 @@ class Runtime:
         if not self.journal.advance(turn.id, turn.generation, step, phase, current):
             raise StaleTurn
 
+    def _check_assistant_job(self, role, turn_id):
+        self.workspace_tools.actor(role)
+        job = self.db.execute("SELECT input FROM assistant_jobs WHERE turn_id = ?", (turn_id,)).fetchone()
+        if job is None:
+            raise WorkspaceNotFound("Assistant job is unavailable")
+        self.fork_messages.authorize_job(role, job["input"])
+
     async def _run(self, role: str, turn: ActiveTurn, prompt, workspace_id):
         scheduled = self._scheduled(turn.id)
+        is_fork = self.forks is not None and self.forks.exists(role)
+        fork_message_id = None
+
+        def check_scope():
+            if is_fork:
+                self._check_assistant_job(role, turn.id)
+            elif fork_message_id is not None:
+                return self.fork_messages.authorize_message(role, fork_message_id)
+
         try:
             instructions = prompt if prompt is not None else ROLES[role]
             if scheduled:
                 instructions += DELIVERY_PROMPT
-            prior = [{"role": "system", "content": instructions}, *self._history(role)]
+                delivery = self.db.execute("""
+                    SELECT d.* FROM scheduled_turns s JOIN message_deliveries d USING (event_id, session_id, purpose)
+                    WHERE s.turn_id = ?
+                """, (turn.id,)).fetchone()
+                fork_message_id = self.collaboration.fork_message_for_delivery(delivery)
+            version_ids = check_scope()
+            if is_fork:
+                instructions += (
+                    f"\n\nYou are the restricted assistant {role}. "
+                    "Consider the explicitly shared history and relay results using send_fork_message with assistant_id "
+                    "equal to your session ID when the tool is available. Respect the assigned scope."
+                )
+                prior_history = self.forks.model_history(role, turn.id)
+            else:
+                prior_history = self._history(role)
+            prior = [{"role": "system", "content": instructions}, *prior_history]
             checkpoint = self.journal.checkpoint(turn.id)
             current, step, phase = (checkpoint[key] for key in ("history", "step", "phase"))
+            if version_ids is not None:
+                payload = json.loads(current[0]["content"])
+                self.fork_messages.add_delivery_versions(payload, fork_message_id, version_ids)
+                current[0]["content"] = json.dumps(payload, ensure_ascii=False)
             while phase == "tools" or step < self.max_steps:
                 self._check_generation(turn)
+                check_scope()
                 if phase == "tools":
                     pause = None
                     for position, call in enumerate(current[-1].get("tool_calls") or []):
+                        if fork_message_id is not None:
+                            check_scope()
                         result, pause = await self._apply_tool(
                             role, turn, step, position, call, workspace_id, scheduled=scheduled, pause=pause,
                         )
@@ -277,6 +326,9 @@ class Runtime:
                     tools.extend(self.collaboration.tools_for(role))
                 if workspace_id is not None and self.git_approvals is not None:
                     tools.extend(self.git_approvals.tools_for(role, scheduled))
+                if workspace_id is not None and self.forks is not None:
+                    tools.extend(self.forks.tools_for(role))
+                    tools.extend(self.fork_messages.tools_for(role))
                 model_identity = getattr(self.model, "identity", {"mode": "injected", "endpoint": None, "model": None})
                 with self.db:
                     for new_text in self.journal.drain_inputs(turn.id, turn.generation):
@@ -286,7 +338,8 @@ class Runtime:
                     self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **model_identity)
                 assistant = await self.model.complete(prior + current, tools)
                 self._check_generation(turn)
-                if workspace_id is not None:
+                check_scope()
+                if not is_fork and fork_message_id is None and workspace_id is not None:
                     self.workspace_tools.actor(role)
                 current.append(assistant)
                 count = len(assistant.get("tool_calls") or [])
@@ -314,12 +367,12 @@ class Runtime:
                 if self.journal.current(turn.id, turn.generation):
                     self._event(turn.id, "model.failed", generation=turn.generation, error=str(exc))
                     self._write_finish(turn.id, "failed", error=str(exc))
-        except WorkspaceNotFound:
+        except (WorkspaceNotFound, CollaborationInvalid):
             if self.journal.current(turn.id, turn.generation):
                 self._finish(turn.id, "interrupted", error="Execution workspace is no longer available")
         except asyncio.CancelledError:
             if self.journal.current(turn.id, turn.generation):
-                self._finish(turn.id, "recoverable" if scheduled else "interrupted", error="Server stopped")
+                self._finish(turn.id, "recoverable" if scheduled or is_fork else "interrupted", error="Server stopped")
             raise
         except Exception:
             logger.exception("Runtime failed for turn %s", turn.id)
@@ -381,6 +434,11 @@ class Runtime:
         return None
 
     async def _execute_tool(self, role, turn, call_id, name, arguments, workspace_id, scheduled):
+        if workspace_id is not None and self.forks is not None:
+            if name == "fork_session":
+                return await self.forks.execute_create(role, arguments)
+            if name in {"send_fork_message", "decide_fork_result"}:
+                return self.fork_messages.execute(role, name, arguments)
         if workspace_id is not None and self.git_approvals is not None and self.git_approvals.handles(name):
             return await self.git_approvals.execute(role, turn.id, turn.generation, call_id, name, arguments)
         if workspace_id is not None and self.collaboration is not None and self.collaboration.handles(name):

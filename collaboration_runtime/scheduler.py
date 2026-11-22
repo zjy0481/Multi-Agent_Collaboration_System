@@ -27,6 +27,7 @@ class DeliveryScheduler:
         self.workspace = workspace
         self.db = runtime.db
         self.max_parallel = max_parallel
+        self.assistant_first = False
 
     def _claim_one(self):
         """Claim one eligible record; no asynchronous work runs in transaction."""
@@ -53,19 +54,26 @@ class DeliveryScheduler:
                 session = delivery['session_id']
                 if session in self.runtime.active:
                     continue
+                fork_message_id = None
                 try:
+                    fork_message_id = self.collaboration.fork_message_for_delivery(delivery)
                     principal = self.collaboration.auth.member(session)
                     if principal is None or principal.team_id != delivery['team_id']:
                         raise WorkspaceNotFound('Delivery identity unavailable')
                     actor = self.workspace.actor(session)
                     if actor.team_id != delivery['team_id']:
                         raise WorkspaceNotFound('Workspace identity unavailable')
+                    version_ids = None
+                    if fork_message_id is not None:
+                        version_ids = self.runtime.fork_messages.authorize_message(session, fork_message_id)
                     if delivery['turn_id'] is not None:
                         self.collaboration.get_message(delivery['team_id'], principal, delivery['message_id'])
                         self.runtime.reopen_turn(delivery['turn_id'])
                         turn_id = delivery['turn_id']
                     else:
                         payload = self.collaboration.execution_input(delivery, principal)
+                        if version_ids is not None:
+                            self.runtime.fork_messages.add_delivery_versions(payload, fork_message_id, version_ids)
                         text = json.dumps(payload, ensure_ascii=False)
                         turn_id = self.runtime.create_turn(session, text)
                         self.db.execute('''INSERT INTO scheduled_turns(turn_id, event_id, session_id, purpose)
@@ -83,16 +91,57 @@ class DeliveryScheduler:
                                        WHERE event_id = ? AND session_id = ? AND purpose = ?''',
                                     (delivery['event_id'], session, delivery['purpose']))
                     if delivery['turn_id'] is not None:
-                        self.db.execute("UPDATE turns SET status = 'interrupted', error = ? WHERE id = ? AND status = 'recoverable'",
-                                        ('Delivery identity or input unavailable', delivery['turn_id']))
+                        if fork_message_id is not None:
+                            self.runtime._write_finish(delivery['turn_id'], 'interrupted', error='Fork delivery scope ended')
+                        else:
+                            self.db.execute("UPDATE turns SET status = 'interrupted', error = ? WHERE id = ? AND status = 'recoverable'",
+                                            ('Delivery identity or input unavailable', delivery['turn_id']))
             return None
+
+    def _claim_assistant(self):
+        if self.runtime.forks is None:
+            return None
+        with self.db:
+            self.db.execute("BEGIN IMMEDIATE")
+            rows = self.db.execute("""
+                SELECT j.*, t.status AS turn_status FROM assistant_jobs j LEFT JOIN turns t ON t.id = j.turn_id
+                WHERE (j.status = 'pending' OR (j.status = 'running' AND t.status = 'recoverable'))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM turns live WHERE live.role = j.session_id
+                      AND live.status IN ('running', 'recoverable') AND (j.turn_id IS NULL OR live.id != j.turn_id)
+                  )
+                ORDER BY j.turn_id IS NULL, j.job_id
+            """).fetchall()
+            for row in rows:
+                session = row["session_id"]
+                if session in self.runtime.active:
+                    continue
+                try:
+                    actor = self.workspace.actor(session)
+                    self.runtime.fork_messages.authorize_job(session, row["input"])
+                except WorkspaceNotFound:
+                    self.db.execute("UPDATE assistant_jobs SET status = 'cancelled' WHERE job_id = ?", (row["job_id"],))
+                    if row["turn_id"]:
+                        self.runtime._write_finish(row["turn_id"], "interrupted", error="Assistant scope ended")
+                    continue
+                if row["turn_id"]:
+                    turn_id = row["turn_id"]
+                    self.runtime.reopen_turn(turn_id)
+                else:
+                    turn_id = self.runtime.create_turn(session, row["input"])
+                    self.db.execute("UPDATE assistant_jobs SET status = 'running', turn_id = ? WHERE job_id = ?",
+                                    (turn_id, row["job_id"]))
+                return session, turn_id, actor.prompt, actor.workspace_id
+        return None
 
     async def run(self):
         """Poll until cancelled or runtime shutdown; independent sessions can run together."""
         while not self.runtime.closing:
             try:
                 while not self.runtime.closing and len(self.runtime.active) < self.max_parallel:
-                    claimed = self._claim_one()
+                    claimed = ((self._claim_assistant() or self._claim_one()) if self.assistant_first
+                               else (self._claim_one() or self._claim_assistant()))
+                    self.assistant_first = not self.assistant_first
                     if claimed is None:
                         break
                     session, turn_id, prompt, workspace_id = claimed

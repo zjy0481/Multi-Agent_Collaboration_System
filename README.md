@@ -91,6 +91,16 @@ $team.members | Select-Object role_id, name, session_id, workspace_id
 
 真实 HKGAI 抽查使用课程模型 `t2_hkgai-v3_fp8_1m_e7`。模型在第一步调用 `list_participants`，第二步用真实返回的成员 ID 调用 `send_message` 写入群内进展。两次回执保留原调用 ID，回合状态为 `completed`。该抽查使用临时团队与沙箱替身，Docker 隔离由独立回归验证。
 
+## T007 从已完成回合派助手
+
+正式成员用自己的凭据调用 `GET /v1/sessions/{session_id}/turns?completed_only=true` 选择检查点，通过 `POST /v1/sessions/{session_id}/forks` 创建助手。也可以在自己的模型回合调用 `fork_session`。请求包括 `request_id`、`from_turn_id`、活动 `goal_id`、`purpose`，以及首次协商的 `scope_id` 或已有任务的 `task_id` 和 `expected_revision`。用 `history_turn_ids`、`version_ids`、`allowed_tools`、`contact_session_ids` 限定可继承的历史、材料、工具及联系人。
+
+- 助手有独立会话、私有工作区和持久待办。历史按指定检查点投影，只交接明确选择的输入与可验证的工具材料。模型的自由回复可能复述其他会话内容，因此不会随检查点自动继承。后续材料用 `POST /v1/forks/{assistant_id}/handoff` 显式交接固定版本。
+- 父成员及获准联系人可通过 `/v1/forks/{assistant_id}/messages` 与助手私下答疑。两位助手只有在同一工作范围内且双方父成员互相授权时才能直接联系。父成员可以查看自己发起的助手回合状态，并在 `/decision` 采用或退回直接收到的结果，以原消息 ID 为证据。
+- 首次协商关闭、任务修订变更或目标结束后，旧范围停止接收工作。父成员也可调用 `/revoke` 撤销授权。已启动的容器命令可能在原隔离区结束，其结果不能继续写入协作状态。
+
+常规验收运行 `python -m pytest -q tests/test_forks.py`。设置 `RUN_LIVE_FORK_TESTS=1` 后运行 `python -m pytest -q -s tests/test_forks_live.py` 可复验真实 HKGAI 助手使用所选历史及授权文件版本，读取文件后以原工具回执为依据向父成员汇报。
+
 ## T011 真人审批 Git 推送
 
 安装 Git，准备仅由本机操作者管理的裸仓库，并在启动服务的进程设置目标目录。目标名称是裸仓库文件夹名去掉 `.git`。

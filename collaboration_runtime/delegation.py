@@ -74,6 +74,7 @@ class DelegationService:
         self.collaboration = collaboration
         self.db = collaboration.db
         self.artifacts = workspace.artifacts
+        self.forks = None
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS delegation_tasks (
                 id TEXT PRIMARY KEY,
@@ -286,6 +287,16 @@ class DelegationService:
         self._check_assistant_scope(assistant, record["task_id"], record["scope_id"])
         if not set(record["terms"]["input_version_ids"]) <= set(assistant.versions):
             raise CollaborationForbidden("Input version was not handed off to this assistant")
+        if self.forks is not None and self.forks.exists(assistant.session_id):
+            fork = self.forks.require_active(assistant.session_id)
+            if record["goal_id"] != fork["goal_id"] or record["base_revision"] != fork["expected_revision"]:
+                raise CollaborationForbidden("The draft is outside the assistant's goal or task revision")
+            allowed_sessions = {fork["parent_session_id"], *fork["contact_session_ids"]}
+            team = self.collaboration.teams.get(assistant.team_id)
+            allowed_members = {member["member_id"] for member in team["members"]
+                               if member["session_id"] in allowed_sessions}
+            if not self._parties(record["dispatcher_id"], record["terms"]) <= allowed_members:
+                raise CollaborationForbidden("Draft commitments include a party outside the assistant grant")
 
     def _validate_links(self, team_id, participants, record):
         for field in ("parent_task_id", "dependency_ids"):
@@ -344,7 +355,7 @@ class DelegationService:
 
     def _new_version(self, team_id, actor, lead, members, previous, terms, *, base_revision, assistant):
         if assistant is not None:
-            self._check_assistant_draft(assistant, {**previous, "terms": terms})
+            self._check_assistant_draft(assistant, {**previous, "terms": terms, "base_revision": base_revision})
         base = self._check_basis(team_id, actor, previous["task_id"], base_revision, show_changes=assistant is None)
         required = self._parties(previous["dispatcher_id"], terms)
         if "terms" in previous:
