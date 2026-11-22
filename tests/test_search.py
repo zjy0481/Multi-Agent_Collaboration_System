@@ -1,4 +1,5 @@
 import asyncio
+import os
 
 import httpx
 import pytest
@@ -57,8 +58,10 @@ def test_http_failures_do_not_follow_redirect_or_leak_secret(status):
     run(check())
 
 
-def test_bad_config_response_and_input(monkeypatch):
+def test_bad_config_response_and_input(monkeypatch, tmp_path):
+    monkeypatch.setattr("collaboration_runtime.search.PROJECT_ENV", tmp_path / "missing.env")
     monkeypatch.delenv("COURSE_SEARCH_URL", raising=False)
+    monkeypatch.delenv("COURSE_SEARCH_API_KEY", raising=False)
     assert SearchClient.from_env() is None
     with pytest.raises(SearchError):
         SearchClient("http://remote.example/search")
@@ -77,4 +80,49 @@ def test_bad_config_response_and_input(monkeypatch):
         finally:
             await client.aclose()
 
+    run(check())
+
+
+def test_dotenv_bom_no_interpolation_and_environment_precedence(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text('COURSE_SEARCH_URL=https://file.example/search\nCOURSE_SEARCH_API_KEY=${LITERAL_SECRET}\n', encoding="utf-8-sig")
+    monkeypatch.setattr("collaboration_runtime.search.PROJECT_ENV", env_file)
+    monkeypatch.delenv("COURSE_SEARCH_URL", raising=False)
+    monkeypatch.delenv("COURSE_SEARCH_API_KEY", raising=False)
+    client = SearchClient.from_env()
+    assert client._endpoint == "https://file.example/search"
+    assert client._client.headers["authorization"] == "Bearer ${LITERAL_SECRET}"
+    assert "COURSE_SEARCH_URL" not in os.environ
+    assert "COURSE_SEARCH_API_KEY" not in os.environ
+    run(client.aclose())
+    monkeypatch.setenv("COURSE_SEARCH_URL", "https://override.example/search")
+    monkeypatch.setenv("COURSE_SEARCH_API_KEY", "environment-secret")
+    client = SearchClient.from_env()
+    assert client._endpoint == "https://override.example/search"
+    assert client._client.headers["authorization"] == "Bearer environment-secret"
+    run(client.aclose())
+    monkeypatch.setenv("COURSE_SEARCH_URL", "")
+    assert SearchClient.from_env() is None
+
+
+def test_dotenv_load_and_provider_auth_errors_do_not_fallback(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    monkeypatch.setattr("collaboration_runtime.search.PROJECT_ENV", env_file)
+    monkeypatch.delenv("COURSE_SEARCH_URL", raising=False)
+    monkeypatch.delenv("COURSE_SEARCH_API_KEY", raising=False)
+    env_file.write_bytes(b"\xff")
+    with pytest.raises(SearchError, match="UTF-8"):
+        SearchClient.from_env()
+    env_file.write_text("COURSE_SEARCH_URL=https://search.example/search\nCOURSE_SEARCH_API_KEY=secret-test\n", encoding="utf-8")
+
+    async def check():
+        client = SearchClient.from_env()
+        await client._client.aclose()
+        client._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(401, text="secret-test")))
+        try:
+            with pytest.raises(SearchError, match="401") as error:
+                await client.search("test", 1)
+            assert "secret-test" not in str(error.value)
+        finally:
+            await client.aclose()
     run(check())

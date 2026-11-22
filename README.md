@@ -92,6 +92,24 @@ $env:COLLABORATION_GIT_TARGETS_DIR = (Resolve-Path .tmp/git-remotes).Path
 
 T011 使用本地可控裸仓库完成验收，真实 GitHub 交付由 T016 验证。
 
+## T013 真实端点联调
+
+以下测试需要显式开启。课程模型测试会使用本机课程凭据及真实 Docker 工作区。它验证缺省 Lead 建组，再令模型将私有文件中在运行时随机生成的值通过两次工具调用写入群聊。
+
+```powershell
+$env:RUN_LIVE_COURSE_TESTS = '1'
+python -m pytest -q -s tests/test_course_integration.py
+```
+
+联调记录使用 `course` 模式、`api1.hkgai.net`、模型 `t2_hkgai-v3_fp8_1m_e7` 和 Chat Completions。真实模型生成了缺省 Lead，并在不同模型步骤发出 `read_file` 和 `send_message`。测试核对了两个原工具调用 ID、私有文件的随机值与群聊记录。认证失败由 HTTP 401 测试传输验证，无需向课程端点提交无效密钥。
+
+取得获准检索服务后，可在本机 `.env` 填写 `COURSE_SEARCH_URL` 为该服务的 SearXNG `/search` JSON 接口，必要时填写 `COURSE_SEARCH_API_KEY`。使用固定公开查询验证真实来源，重启后按 `search_id` 读取原结果。
+
+```powershell
+$env:RUN_LIVE_SEARCH_TESTS = '1'
+python -m pytest -q -s tests/test_live_search.py
+```
+
 ## 开发与测试双角色
 
 打开本机的 [接口交互页](http://127.0.0.1:8000/docs)，或在另一个 PowerShell 中使用：

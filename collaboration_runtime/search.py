@@ -7,6 +7,9 @@ import os
 from urllib.parse import urlsplit
 
 import httpx
+from dotenv import dotenv_values
+
+from .model import PROJECT_ENV
 
 
 class SearchError(Exception):
@@ -46,10 +49,15 @@ class SearchClient:
 
     @classmethod
     def from_env(cls) -> SearchClient | None:
-        endpoint = os.environ.get("COURSE_SEARCH_URL", "").strip()
+        try:
+            values = dotenv_values(PROJECT_ENV, encoding="utf-8-sig", interpolate=False)
+        except (OSError, UnicodeError):
+            raise SearchError("Could not read the project .env as UTF-8") from None
+        endpoint = (os.environ.get("COURSE_SEARCH_URL", values.get("COURSE_SEARCH_URL")) or "").strip()
         if not endpoint:
             return None
-        return cls(endpoint, api_key=os.environ.get("COURSE_SEARCH_API_KEY") or None)
+        api_key = os.environ.get("COURSE_SEARCH_API_KEY", values.get("COURSE_SEARCH_API_KEY")) or None
+        return cls(endpoint, api_key=api_key)
 
     async def search(self, query: str, limit: int) -> list[dict]:
         if not isinstance(query, str) or not query.strip() or len(query) > 1000:
