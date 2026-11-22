@@ -1,0 +1,122 @@
+{
+  "format": "PP-1",
+  "plan_id": "pp-ba8ebd7d-1a02-4703-9797-328c57f1d5ff",
+  "revision": "r0002",
+  "parent_revision": null,
+  "basis": [
+    {
+      "id": "REQ",
+      "ref": "../../../../grill_result/agent-collaboration/requirement.md",
+      "scope": "定稿业务范围、验收和复用依据。本轮以工作区内容及 SHA-256 标识版本。",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": null,
+      "sha256": "e43acd2902d3f57fef5e244949a0fba2a95db5e997b3b7001558727d8fa96038"
+    },
+    {
+      "id": "DOMAIN",
+      "ref": "../../../../grill_result/agent-collaboration/domain-model.md",
+      "scope": "既有领域模型。本轮以工作区内容及 SHA-256 标识版本。",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": null,
+      "sha256": "f7c2436b2e2e7a4032a6c3e3eca13deca141dd2ff2f22edaab13df19f8f9dd69"
+    },
+    {
+      "id": "RUNTIME",
+      "ref": "../../../../grill_result/agent-collaboration/runtime-contract.md",
+      "scope": "现有运行时约束。本轮以工作区内容及 SHA-256 标识版本。",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": null,
+      "sha256": "1b85281943c5450667a1f1a9f31203920e8444caacb39928dfbe9f9abe93d5fa"
+    },
+    {
+      "id": "DESIGN",
+      "ref": "../../../../preliminary-proposal.md",
+      "scope": "工具入口、课程场景和交付约束。本轮以工作区内容及 SHA-256 标识版本。",
+      "confirmation": "继承来源",
+      "completeness": null,
+      "version": null,
+      "sha256": "02d46e98bbf0ce8a6c133d73d151d301cb1b2ff87897c1dfe47c68436b1ed082"
+    },
+    {
+      "id": "COURSE",
+      "ref": "../../../../raw/basic_requirement.md",
+      "scope": "课程硬约束和评测交付",
+      "confirmation": "课程原文",
+      "completeness": null,
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "241e7a58dac3ecfc4e6293bd7c96f3f2577e47e4aa8ad416d24425f5fb76a786"
+    },
+    {
+      "id": "SAMPLES",
+      "ref": "../../../../../test samples/README.md",
+      "scope": "三个官方样例的角色与连续任务",
+      "confirmation": "课程样例",
+      "completeness": null,
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "9bc106f579ba7fbc3ee536b83d390c906e64cff69294c915e65134f7a3b9134b"
+    },
+    {
+      "id": "PREF",
+      "ref": "../../../../workflow-preferences.md",
+      "scope": "主题内文档偏好",
+      "confirmation": "已接受",
+      "completeness": null,
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "db14774e36d404015c0fe2e1002948490a4576f4303dbcd9b14f4abb70ddadd1"
+    }
+  ],
+  "content_files": {
+    "specs/S001.md": "29d77ef61f8ee5a3bdfb9ba8f39888ab26248f21c789366d0169ab3447fd5ca2",
+    "specs/S002.md": "cbbf6518087cb93c109182fe3c0a8218f094a0bd5acef282612732077d6c6c3d",
+    "specs/S003.md": "63bae6ec457346a40f9d5d7005c29e7d99361bc0c613133b6d713cb8ae927187",
+    "specs/S004.md": "f3d27ffbe2f38deec0b5cb933c98eed2ffc2e3aa97a31baeb75b431a0d943c63"
+  },
+  "baseline_state": "draft",
+  "checks": {
+    "result": "incomplete",
+    "basis_digest": null,
+    "command": "Python read-only validation of revision hashes, local links and anchors, and draft pointer",
+    "evidence_ref": null
+  },
+  "independent_review": {
+    "result": "incomplete",
+    "reviewer": {
+      "agent_id": "01a2032c-03bf-7900-bf44-1a0ae3ea564a",
+      "method": "spec-review",
+      "scope": "F002、F003 本次变更接缝复核通过"
+    },
+    "input_files": {
+      "../../../../grill_result/agent-collaboration/requirement.md": "e43acd2902d3f57fef5e244949a0fba2a95db5e997b3b7001558727d8fa96038",
+      "specs/S001.md": "29d77ef61f8ee5a3bdfb9ba8f39888ab26248f21c789366d0169ab3447fd5ca2",
+      "specs/S004.md": "f3d27ffbe2f38deec0b5cb933c98eed2ffc2e3aa97a31baeb75b431a0d943c63"
+    },
+    "findings": [
+      "review.md#targeted-review"
+    ]
+  },
+  "confirmations": [
+    {
+      "kind": "cross_ticket_design",
+      "scope": "任务写入能力、必需交付、队列激活。确认范围限本轮三项业务规则",
+      "accepted_by": "user",
+      "authority_ref": "review.md#business-decisions",
+      "decision_ref": "specs/S001.md#accepted-decisions",
+      "content_digest": "ee3a0822efb4d2a5bdde00469a274c567e748ae3a23ac0370233f7d7f91a34bf"
+    }
+  ],
+  "changes": [
+    {
+      "scope": "S001 和 S004",
+      "reason": "记录用户对三项候选业务规则的决定",
+      "verification": "recheck"
+    },
+    {
+      "scope": "S002 和 S003 正文及各自的局部验证策略",
+      "reason": "本轮规格正文逐字节沿用 r0001。端到端的目标终态和评测接缝由关联规格覆盖",
+      "verification": "reuse"
+    }
+  ]
+}

@@ -1,0 +1,2075 @@
+{
+  "format": "PP-1",
+  "plan_id": "pp-ba8ebd7d-1a02-4703-9797-328c57f1d5ff",
+  "revision": "r0003",
+  "requirements": [
+    {
+      "id": "R001",
+      "source_ref": "REQ",
+      "locator": "建组和增员",
+      "summary": "导入、Lead 过渡、增员、同等写权和工作区"
+    },
+    {
+      "id": "R002",
+      "source_ref": "REQ",
+      "locator": "自主拆解、确认与交付",
+      "summary": "草案意见与委托修订、权限、指派、交付审查"
+    },
+    {
+      "id": "R003",
+      "source_ref": "REQ",
+      "locator": "群聊、私聊与人工决定／多问题与重启",
+      "summary": "群聊点名、私聊、等待、引用答复与重启"
+    },
+    {
+      "id": "R004",
+      "source_ref": "REQ",
+      "locator": "指定旧回合建分支／助手参与首次委托协商",
+      "summary": "历史检查点、首次协商、同版确认以及幂等"
+    },
+    {
+      "id": "R005",
+      "source_ref": "REQ",
+      "locator": "跨参与者隔离",
+      "summary": "按来源隔离消息、工具、资源、回放、经验和导出"
+    },
+    {
+      "id": "R006",
+      "source_ref": "REQ",
+      "locator": "草案过期／非阻塞答疑",
+      "summary": "过期草案校验与父助手异步交接"
+    },
+    {
+      "id": "R007",
+      "source_ref": "REQ",
+      "locator": "终止时仍有在途工作／必需交付与下一目标",
+      "summary": "终止、必需交付与审查、冻结和排队推进"
+    },
+    {
+      "id": "R008",
+      "source_ref": "REQ",
+      "locator": "局部返工",
+      "summary": "旧结果和旧审查保留，依赖下游待复核"
+    },
+    {
+      "id": "R009",
+      "source_ref": "REQ",
+      "locator": "工具执行与外部授权／真实模型与外部工具",
+      "summary": "真实课程模型、检索、宿主管控工具与审批状态"
+    },
+    {
+      "id": "R010",
+      "source_ref": "REQ",
+      "locator": "授权绑定与过期",
+      "summary": "同一批准绑定动作，超时核对目标 ref"
+    },
+    {
+      "id": "R011",
+      "source_ref": "REQ",
+      "locator": "个人经验与跨题延续／记忆与两题连续",
+      "summary": "成员经验采用、隔离、跨题共享与真实场景"
+    },
+    {
+      "id": "R012",
+      "source_ref": "REQ",
+      "locator": "指标可重算／登记前等待纳入评测",
+      "summary": "两类完成率、耗时、登记前终止及可复查报告"
+    },
+    {
+      "id": "R013",
+      "source_ref": "REQ",
+      "locator": "开源复用与本组实现边界",
+      "summary": "固定实际依赖、上游适用性与首轮运行校验"
+    },
+    {
+      "id": "R014",
+      "source_ref": "COURSE",
+      "locator": "2.4 File Format Constraints / 2.5 User Interface",
+      "summary": "网页最小操作路径、通用文档及基金样例输出格式"
+    },
+    {
+      "id": "R015",
+      "source_ref": "COURSE",
+      "locator": "2.6 Standardized LLM Backbone",
+      "summary": "正式模型及辅助调用均使用课程允许的提供方"
+    },
+    {
+      "id": "R016",
+      "source_ref": "SAMPLES",
+      "locator": "Three Multi-Agent Collaboration Scenarios",
+      "summary": "三组各两道官方样例和连续交接证据"
+    },
+    {
+      "id": "R017",
+      "source_ref": "COURSE",
+      "locator": "Evaluation & Metrics / The Final Evaluation Dataset",
+      "summary": "以实际闭集提交中期和期末量化、失败及记忆分析"
+    },
+    {
+      "id": "R018",
+      "source_ref": "COURSE",
+      "locator": "Deliverables and Submission Requirements",
+      "summary": "仓库、逐人贡献、架构、评测报告和课程展示材料"
+    },
+    {
+      "id": "R019",
+      "source_ref": "REQ",
+      "locator": "U-001 基金第二题正式提交格式",
+      "summary": "课程组决定后核对基金题正式交件格式"
+    },
+    {
+      "id": "R020",
+      "source_ref": "REQ",
+      "locator": "U-002 正式评测输入与端点条件",
+      "summary": "真实端点、配额和闭集办测条件"
+    }
+  ],
+  "specs": [
+    {
+      "id": "S001",
+      "title": "团队、消息与任务协作",
+      "object_revision": 2,
+      "body_ref": "specs/S001.md",
+      "separate_reason": "拥有公共写读授权和任务生命周期契约"
+    },
+    {
+      "id": "S002",
+      "title": "模型运行、历史检查点与助手分支",
+      "object_revision": 1,
+      "body_ref": "specs/S002.md",
+      "separate_reason": "模型工具循环、运行代次和历史授权边界可独立验证"
+    },
+    {
+      "id": "S003",
+      "title": "私有执行、产物版本与审查",
+      "object_revision": 1,
+      "body_ref": "specs/S003.md",
+      "separate_reason": "执行环境、外部动作及版本证据归属独立"
+    },
+    {
+      "id": "S004",
+      "title": "个人经验、评测与课程场景",
+      "object_revision": 2,
+      "body_ref": "specs/S004.md",
+      "separate_reason": "承接跨题与跨规格的可重算评测和课程场景"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "T001",
+      "title": "导入角色并建立可用团队",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T001.md",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "建组、持久状态、工作区就绪与网页联动",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T002",
+      "title": "发送群聊与私聊并恢复可见消息",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T002.md",
+      "spec_ids": [
+        "S001"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "消息路由、持久待办、目标登记和浏览器重连",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T003",
+      "title": "处理真人澄清与重启接续",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T003.md",
+      "spec_ids": [
+        "S001",
+        "S002"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 2,
+      "estimate_basis": "问题状态、引用路由和重启恢复",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T004",
+      "title": "协商委托并登记任务修订",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T004.md",
+      "spec_ids": [
+        "S001"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "草案状态机、权限及并发写入",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T005",
+      "title": "在私有工作区执行并交接版本",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T005.md",
+      "spec_ids": [
+        "S003",
+        "S001"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "Docker 执行、受控工具和不可变发布",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T006",
+      "title": "用可重复的工具回合驱动持久待办",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T006.md",
+      "spec_ids": [
+        "S002",
+        "S001"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "模型循环、调度和恢复",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T007",
+      "title": "从历史回合派助手完成一次受限协作",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T007.md",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "历史分支、授权和异步助手流程",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T008",
+      "title": "提交版本并完成局部返工",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T008.md",
+      "spec_ids": [
+        "S001",
+        "S003"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 2,
+      "estimate_basis": "提交审查、影响关系和有效验收",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T009",
+      "title": "关闭或终止目标并激活下一项",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T009.md",
+      "spec_ids": [
+        "S001",
+        "S004"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 2,
+      "estimate_basis": "目标生命周期与原子冻结",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T010",
+      "title": "从业务事实生成可重算报告",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T010.md",
+      "spec_ids": [
+        "S004"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 2,
+      "estimate_basis": "聚合查询、权限和评测证据",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T011",
+      "title": "按真人批准执行 Git 推送",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T011.md",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 2,
+      "estimate_basis": "Git 动作、审批回执和故障核对",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T012",
+      "title": "记录个人经验并跨题验证采用",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T012.md",
+      "spec_ids": [
+        "S002",
+        "S003",
+        "S004"
+      ],
+      "kind": "behavior",
+      "exception_reason": null,
+      "completed": false,
+      "completion_basis": null,
+      "effort": 2,
+      "estimate_basis": "经验归属、读授权和采用证据",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T013",
+      "title": "联调课程端点与真实工具",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T013.md",
+      "spec_ids": [
+        "S002",
+        "S003"
+      ],
+      "kind": "spec_validation",
+      "exception_reason": "验收依赖整合版本、课程输入或外部动作，需要独立工量和可定位证据。",
+      "completed": false,
+      "completion_basis": null,
+      "effort": 2,
+      "estimate_basis": "真实模型和检索的适配及联调",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T014",
+      "title": "贯通协作、权限与故障恢复验收",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T014.md",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003",
+        "S004"
+      ],
+      "kind": "spec_validation",
+      "exception_reason": "验收依赖整合版本、课程输入或外部动作，需要独立工量和可定位证据。",
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "整套服务联验、夹具及整改复测",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T015",
+      "title": "运行三组官方样例各两题",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T015.md",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003",
+        "S004"
+      ],
+      "kind": "spec_validation",
+      "exception_reason": "验收依赖整合版本、课程输入或外部动作，需要独立工量和可定位证据。",
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "三组样例运行、产物复核及证据整理",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T016",
+      "title": "验收一次获准的 GitHub 交付",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T016.md",
+      "spec_ids": [
+        "S003"
+      ],
+      "kind": "spec_validation",
+      "exception_reason": "验收依赖整合版本、课程输入或外部动作，需要独立工量和可定位证据。",
+      "completed": false,
+      "completion_basis": null,
+      "effort": 1,
+      "estimate_basis": "固定目标的一次外部动作验收",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T017",
+      "title": "运行中期与期末闭集评测",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T017.md",
+      "spec_ids": [
+        "S004"
+      ],
+      "kind": "spec_validation",
+      "exception_reason": "验收依赖整合版本、课程输入或外部动作，需要独立工量和可定位证据。",
+      "completed": false,
+      "completion_basis": null,
+      "effort": 3,
+      "estimate_basis": "两次正式评测、统计和失败分析",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    },
+    {
+      "id": "T018",
+      "title": "汇总课程展示与正式交付材料",
+      "object_revision": 1,
+      "origin_revision": "revisions/r0003/revision.json",
+      "body_ref": "tickets/T018.md",
+      "spec_ids": [
+        "S004"
+      ],
+      "kind": "non_code",
+      "exception_reason": "课程交付材料需要综合来自多次运行和逐人贡献的证据。",
+      "completed": false,
+      "completion_basis": null,
+      "effort": 2,
+      "estimate_basis": "汇总多源证据与提交格式复核",
+      "resources": [],
+      "gap_ids": [],
+      "delivery": {
+        "route": "unspecified",
+        "target_ref": null,
+        "integration_group": null
+      }
+    }
+  ],
+  "coverage": [
+    {
+      "requirement_id": "R001",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S003"
+      ],
+      "ticket_ids": [
+        "T001",
+        "T004",
+        "T005",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T001",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T004",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R002",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S003"
+      ],
+      "ticket_ids": [
+        "T004",
+        "T008",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T004",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T008",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R003",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S002"
+      ],
+      "ticket_ids": [
+        "T002",
+        "T003",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T002",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T003",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R004",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003"
+      ],
+      "ticket_ids": [
+        "T004",
+        "T005",
+        "T006",
+        "T007",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T007",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R005",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003",
+        "S004"
+      ],
+      "ticket_ids": [
+        "T002",
+        "T005",
+        "T007",
+        "T010",
+        "T012",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R006",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S002"
+      ],
+      "ticket_ids": [
+        "T004",
+        "T006",
+        "T007",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T007",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R007",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S004"
+      ],
+      "ticket_ids": [
+        "T009",
+        "T010",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T009",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R008",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S003"
+      ],
+      "ticket_ids": [
+        "T008",
+        "T009",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T008",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R009",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S002",
+        "S003"
+      ],
+      "ticket_ids": [
+        "T005",
+        "T006",
+        "T011",
+        "T013",
+        "T014",
+        "T016"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T013",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T016",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R010",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003"
+      ],
+      "ticket_ids": [
+        "T011",
+        "T014",
+        "T016"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T011",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T016",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R011",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S002",
+        "S003",
+        "S004"
+      ],
+      "ticket_ids": [
+        "T012",
+        "T014",
+        "T015"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T012",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T015",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R012",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S004"
+      ],
+      "ticket_ids": [
+        "T009",
+        "T010",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T010",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R013",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003",
+        "S004"
+      ],
+      "ticket_ids": [
+        "T001",
+        "T002",
+        "T005",
+        "T006",
+        "T007",
+        "T011",
+        "T012",
+        "T013",
+        "T014"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T013",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R014",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S004"
+      ],
+      "ticket_ids": [
+        "T002",
+        "T003",
+        "T008",
+        "T014",
+        "T015",
+        "T018"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T002",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T003",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T008",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T014",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T015",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T018",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R015",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S002"
+      ],
+      "ticket_ids": [
+        "T006",
+        "T013"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T006",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T013",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R016",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S001",
+        "S002",
+        "S003",
+        "S004"
+      ],
+      "ticket_ids": [
+        "T015"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T015",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R017",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S004"
+      ],
+      "ticket_ids": [
+        "T017"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T017",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R018",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S004"
+      ],
+      "ticket_ids": [
+        "T018"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T018",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R019",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S004"
+      ],
+      "ticket_ids": [
+        "T018"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T018",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    },
+    {
+      "requirement_id": "R020",
+      "disposition": "arranged",
+      "spec_ids": [
+        "S002",
+        "S004"
+      ],
+      "ticket_ids": [
+        "T013",
+        "T017"
+      ],
+      "verification": [
+        {
+          "ticket_id": "T013",
+          "acceptance_anchor": "acceptance"
+        },
+        {
+          "ticket_id": "T017",
+          "acceptance_anchor": "acceptance"
+        }
+      ],
+      "gap_ids": [],
+      "decision_ref": null
+    }
+  ],
+  "gaps": [],
+  "lineage": [],
+  "resources": [],
+  "integration_groups": [],
+  "dependencies": [
+    {
+      "consumer": "T002",
+      "provider": {
+        "kind": "ticket",
+        "id": "T001"
+      },
+      "use_at": "start",
+      "needs": "团队、参与者和主会话",
+      "ready_when": "三组角色导入验证通过，可查询稳定的团队、参与者与会话 ID，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T001.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D001"
+    },
+    {
+      "consumer": "T003",
+      "provider": {
+        "kind": "ticket",
+        "id": "T002"
+      },
+      "use_at": "start",
+      "needs": "消息写入与引用投递",
+      "ready_when": "群聊和私聊的消息 ID、引用入口和投递持久化可联合运行，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T002.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D002"
+    },
+    {
+      "consumer": "T004",
+      "provider": {
+        "kind": "ticket",
+        "id": "T002"
+      },
+      "use_at": "start",
+      "needs": "已登记活动目标、原始布置消息和事件通知",
+      "ready_when": "Lead 可按原消息幂等登记活动目标，并能在共同版本按权限投影后续通知",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T002.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D003"
+    },
+    {
+      "consumer": "T005",
+      "provider": {
+        "kind": "ticket",
+        "id": "T001"
+      },
+      "use_at": "start",
+      "needs": "角色工作区的登记、准备和查找",
+      "ready_when": "初始及新增成员有通过隔离检查的工作区映射，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T001.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D004"
+    },
+    {
+      "consumer": "T006",
+      "provider": {
+        "kind": "ticket",
+        "id": "T002"
+      },
+      "use_at": "start",
+      "needs": "可领取的消息待办及会话身份",
+      "ready_when": "重启后仍可读取可领取的定向消息待办，稳定识别其执行会话，并已进入共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T002.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D005"
+    },
+    {
+      "consumer": "T007",
+      "provider": {
+        "kind": "ticket",
+        "id": "T004"
+      },
+      "use_at": "start",
+      "needs": "首次协商和既有任务修订",
+      "ready_when": "同版确认、草案范围和过期处理已通过拟定用例，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T004.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D006"
+    },
+    {
+      "consumer": "T007",
+      "provider": {
+        "kind": "ticket",
+        "id": "T005"
+      },
+      "use_at": "start",
+      "needs": "授权材料版本和助手工作区",
+      "ready_when": "部署支持隔离工作区，可按版本授权和导入，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T005.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D007"
+    },
+    {
+      "consumer": "T007",
+      "provider": {
+        "kind": "ticket",
+        "id": "T006"
+      },
+      "use_at": "start",
+      "needs": "成组回合、领取、代次和独立模型推进",
+      "ready_when": "完成回合、工具配对、可恢复回执与并行执行已经验证，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T006.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D008"
+    },
+    {
+      "consumer": "T008",
+      "provider": {
+        "kind": "ticket",
+        "id": "T004"
+      },
+      "use_at": "start",
+      "needs": "任务 ID、有效修订、提交人和审查人关系",
+      "ready_when": "委托登记和修订历史可按授权读取，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T004.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D009"
+    },
+    {
+      "consumer": "T008",
+      "provider": {
+        "kind": "ticket",
+        "id": "T005"
+      },
+      "use_at": "start",
+      "needs": "不可变产物的发布与获准读取",
+      "ready_when": "可用固定版本作审查证据并复现，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T005.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D010"
+    },
+    {
+      "consumer": "T009",
+      "provider": {
+        "kind": "ticket",
+        "id": "T003"
+      },
+      "use_at": "start",
+      "needs": "人类问题的阻塞和撤销关联",
+      "ready_when": "重启及引用答复验证通过，可查有效阻塞与工作范围，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T003.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D011"
+    },
+    {
+      "consumer": "T009",
+      "provider": {
+        "kind": "ticket",
+        "id": "T008"
+      },
+      "use_at": "start",
+      "needs": "当前通过证据和下游待复核",
+      "ready_when": "可对当前任务修订读取稳定验收事实，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T008.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D012"
+    },
+    {
+      "consumer": "T009",
+      "provider": {
+        "kind": "ticket",
+        "id": "T007"
+      },
+      "use_at": "start",
+      "needs": "分支撤权和助手终止",
+      "ready_when": "可关闭指定工作范围并阻止旧代次继续生效，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T007.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D013"
+    },
+    {
+      "consumer": "T010",
+      "provider": {
+        "kind": "ticket",
+        "id": "T009"
+      },
+      "use_at": "start",
+      "needs": "目标终态、冻结事实及登记前终止记录",
+      "ready_when": "可稳定读取已终结目标的事实，并从消息查询登记前终止，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T009.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D014"
+    },
+    {
+      "consumer": "T011",
+      "provider": {
+        "kind": "ticket",
+        "id": "T003"
+      },
+      "use_at": "start",
+      "needs": "真人交互入口和受阻工作",
+      "ready_when": "浏览器可接收针对特定事件的人工输入，引用及等待记录可持久化，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T003.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D015"
+    },
+    {
+      "consumer": "T011",
+      "provider": {
+        "kind": "ticket",
+        "id": "T005"
+      },
+      "use_at": "start",
+      "needs": "可运行受控命令的隔离工作区",
+      "ready_when": "授权身份可定位隔离工作区并运行受控命令，工作区操作已在共同版本验证",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T005.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D016"
+    },
+    {
+      "consumer": "T011",
+      "provider": {
+        "kind": "ticket",
+        "id": "T006"
+      },
+      "use_at": "start",
+      "needs": "模型调用 ID 和可恢复的待办",
+      "ready_when": "待办能投递到原会话，主流程有重放和旧代次检查，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T006.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D017"
+    },
+    {
+      "consumer": "T012",
+      "provider": {
+        "kind": "ticket",
+        "id": "T007"
+      },
+      "use_at": "start",
+      "needs": "显式交接范围与受限助手读取",
+      "ready_when": "可对作者、授权助手和第三方使用同一来源投影，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T007.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D018"
+    },
+    {
+      "consumer": "T013",
+      "provider": {
+        "kind": "ticket",
+        "id": "T005"
+      },
+      "use_at": "start",
+      "needs": "实际检索所用的工具适配及来源记录",
+      "ready_when": "受控工具可提交检索结果及来源，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T005.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D019"
+    },
+    {
+      "consumer": "T013",
+      "provider": {
+        "kind": "ticket",
+        "id": "T006"
+      },
+      "use_at": "start",
+      "needs": "模型适配器和可重放工具闭环",
+      "ready_when": "离线双调用和错误分类通过，能够配置课程端点，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T006.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D020"
+    },
+    {
+      "consumer": "T014",
+      "provider": {
+        "kind": "ticket",
+        "id": "T007"
+      },
+      "use_at": "acceptance",
+      "needs": "历史分支、协商与权限正反例",
+      "ready_when": "可在共同基线证明中途分支及父子并行，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T007.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D021"
+    },
+    {
+      "consumer": "T014",
+      "provider": {
+        "kind": "ticket",
+        "id": "T010"
+      },
+      "use_at": "integration",
+      "needs": "结案冻结、队列及指标输出",
+      "ready_when": "报告能从可定位的业务记录重算且权限投影可用，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T010.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D022"
+    },
+    {
+      "consumer": "T014",
+      "provider": {
+        "kind": "ticket",
+        "id": "T011"
+      },
+      "use_at": "integration",
+      "needs": "审批状态及 Git 核对",
+      "ready_when": "本地可控远端上有拒绝、重放及未知结果的记录，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T011.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D023"
+    },
+    {
+      "consumer": "T014",
+      "provider": {
+        "kind": "ticket",
+        "id": "T012"
+      },
+      "use_at": "integration",
+      "needs": "跨题经验读写及采用记录",
+      "ready_when": "能用已授权与未授权操作者复现实例，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T012.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D024"
+    },
+    {
+      "consumer": "T015",
+      "provider": {
+        "kind": "ticket",
+        "id": "T013"
+      },
+      "use_at": "start",
+      "needs": "真实课程模型和工具配置",
+      "ready_when": "两步真实工具已由实际端点完成并保全证据，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T013.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D025"
+    },
+    {
+      "consumer": "T015",
+      "provider": {
+        "kind": "ticket",
+        "id": "T014"
+      },
+      "use_at": "start",
+      "needs": "通过离线联验的完整系统基线",
+      "ready_when": "组合行为已经在共同版本有实际证据，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T014.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D026"
+    },
+    {
+      "consumer": "T016",
+      "provider": {
+        "kind": "ticket",
+        "id": "T011"
+      },
+      "use_at": "acceptance",
+      "needs": "宿主的 GitHub 绑定批准及回执",
+      "ready_when": "本地夹具验证了审批绑定、幂等和结果核对，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T011.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D027"
+    },
+    {
+      "consumer": "T017",
+      "provider": {
+        "kind": "ticket",
+        "id": "T013"
+      },
+      "use_at": "start",
+      "needs": "实际端点、模型和工具传输",
+      "ready_when": "真实工具闭环与课程授权的配置可用，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T013.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D028"
+    },
+    {
+      "consumer": "T017",
+      "provider": {
+        "kind": "ticket",
+        "id": "T014"
+      },
+      "use_at": "start",
+      "needs": "可报告且通过协作联验的完整基线",
+      "ready_when": "能使用同一版本重放主要功能并生成可重算报告，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T014.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D029"
+    },
+    {
+      "consumer": "T018",
+      "provider": {
+        "kind": "ticket",
+        "id": "T015"
+      },
+      "use_at": "integration",
+      "needs": "三组样例、连题和经验采用案例",
+      "ready_when": "六题成功与失败的证据可定位，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T015.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D030"
+    },
+    {
+      "consumer": "T018",
+      "provider": {
+        "kind": "ticket",
+        "id": "T016"
+      },
+      "use_at": "acceptance",
+      "needs": "GitHub 真实交付的证据",
+      "ready_when": "实际远端 ref 与获准 SHA 的匹配及回执可用，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T016.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D031"
+    },
+    {
+      "consumer": "T018",
+      "provider": {
+        "kind": "ticket",
+        "id": "T017"
+      },
+      "use_at": "integration",
+      "needs": "两次评测和正式性能分析",
+      "ready_when": "实际闭集运行及模型、数据、代码版本均可追溯，并已进入本票可用的共同版本",
+      "readiness": "planned_delivery",
+      "basis_ref": "tickets/T017.md#acceptance",
+      "shared_implementation": true,
+      "early_start_decision_ref": null,
+      "id": "D032"
+    },
+    {
+      "consumer": "T013",
+      "provider": {
+        "kind": "external",
+        "id": "E001"
+      },
+      "use_at": "acceptance",
+      "needs": "课程认可端点、模型、凭据与联调配额可用",
+      "ready_when": "课程认可端点、模型、凭据与联调配额可用",
+      "readiness": "unknown",
+      "basis_ref": "review.md#external-conditions",
+      "shared_implementation": false,
+      "early_start_decision_ref": null,
+      "id": "D033"
+    },
+    {
+      "consumer": "T013",
+      "provider": {
+        "kind": "external",
+        "id": "E002"
+      },
+      "use_at": "acceptance",
+      "needs": "获准实际检索来源和调用权限可用",
+      "ready_when": "获准实际检索来源和调用权限可用",
+      "readiness": "unknown",
+      "basis_ref": "review.md#external-conditions",
+      "shared_implementation": false,
+      "early_start_decision_ref": null,
+      "id": "D034"
+    },
+    {
+      "consumer": "T016",
+      "provider": {
+        "kind": "external",
+        "id": "E003"
+      },
+      "use_at": "acceptance",
+      "needs": "真实 GitHub 验收仓库、目标 ref 及真人批准可用",
+      "ready_when": "真实 GitHub 验收仓库、目标 ref 及真人批准可用",
+      "readiness": "unknown",
+      "basis_ref": "review.md#external-conditions",
+      "shared_implementation": false,
+      "early_start_decision_ref": null,
+      "id": "D035"
+    },
+    {
+      "consumer": "T017",
+      "provider": {
+        "kind": "external",
+        "id": "E004"
+      },
+      "use_at": "start",
+      "needs": "中期及期末闭集输入、发放和评测安排已明确",
+      "ready_when": "中期及期末闭集输入、发放和评测安排已明确",
+      "readiness": "unknown",
+      "basis_ref": "review.md#external-conditions",
+      "shared_implementation": false,
+      "early_start_decision_ref": null,
+      "id": "D036"
+    },
+    {
+      "consumer": "T018",
+      "provider": {
+        "kind": "external",
+        "id": "E005"
+      },
+      "use_at": "integration",
+      "needs": "基金第二题正式提交格式和提交安排已明确",
+      "ready_when": "基金第二题正式提交格式和提交安排已明确",
+      "readiness": "unknown",
+      "basis_ref": "review.md#external-conditions",
+      "shared_implementation": false,
+      "early_start_decision_ref": null,
+      "id": "D037"
+    }
+  ],
+  "external_conditions": [
+    {
+      "id": "E001",
+      "description": "课程认可端点、模型、凭据与联调配额可用",
+      "ready_offset": null,
+      "basis_ref": "review.md#external-conditions"
+    },
+    {
+      "id": "E002",
+      "description": "获准实际检索来源和调用权限可用",
+      "ready_offset": null,
+      "basis_ref": "review.md#external-conditions"
+    },
+    {
+      "id": "E003",
+      "description": "真实 GitHub 验收仓库、目标 ref 及真人批准可用",
+      "ready_offset": null,
+      "basis_ref": "review.md#external-conditions"
+    },
+    {
+      "id": "E004",
+      "description": "中期及期末闭集输入、发放和评测安排已明确",
+      "ready_offset": null,
+      "basis_ref": "review.md#external-conditions"
+    },
+    {
+      "id": "E005",
+      "description": "基金第二题正式提交格式和提交安排已明确",
+      "ready_offset": null,
+      "basis_ref": "review.md#external-conditions"
+    }
+  ],
+  "planning": {
+    "capacity": 2,
+    "capacity_basis": "用户在本轮明确同时推进两张票。",
+    "reference_ticket": {
+      "ticket_id": "T016",
+      "reason": "固定仓库和提交的一次真实回执验证作为相对单位。估算包含验证和整理证据。"
+    },
+    "assumptions": [
+      "相对工量单位，外部等待单独体现在就绪条件。",
+      "共同版本经过上游验收后视为相应共享交付可用。",
+      "当前首版受理的组织路线未指定，计划按逻辑交付和验收归属编排。"
+    ]
+  },
+  "schedule": {
+    "basis_digest": "607f2dbeec7445e7366a0a993dab73b1ece378477ca7761834c522331e4a3914",
+    "intervals": [
+      {
+        "ticket_id": "T001",
+        "start": 0,
+        "end": 3,
+        "premises": []
+      },
+      {
+        "ticket_id": "T002",
+        "start": 3,
+        "end": 6,
+        "premises": [
+          "D001"
+        ]
+      },
+      {
+        "ticket_id": "T003",
+        "start": 6,
+        "end": 8,
+        "premises": [
+          "D002"
+        ]
+      },
+      {
+        "ticket_id": "T004",
+        "start": 6,
+        "end": 9,
+        "premises": [
+          "D003"
+        ]
+      },
+      {
+        "ticket_id": "T005",
+        "start": 3,
+        "end": 6,
+        "premises": [
+          "D004"
+        ]
+      },
+      {
+        "ticket_id": "T006",
+        "start": 8,
+        "end": 11,
+        "premises": [
+          "D005"
+        ]
+      },
+      {
+        "ticket_id": "T007",
+        "start": 11,
+        "end": 14,
+        "premises": [
+          "D006",
+          "D007",
+          "D008"
+        ]
+      },
+      {
+        "ticket_id": "T008",
+        "start": 9,
+        "end": 11,
+        "premises": [
+          "D009",
+          "D010"
+        ]
+      },
+      {
+        "ticket_id": "T009",
+        "start": 14,
+        "end": 16,
+        "premises": [
+          "D011",
+          "D012",
+          "D013"
+        ]
+      },
+      {
+        "ticket_id": "T010",
+        "start": 16,
+        "end": 18,
+        "premises": [
+          "D014"
+        ]
+      },
+      {
+        "ticket_id": "T011",
+        "start": 11,
+        "end": 13,
+        "premises": [
+          "D015",
+          "D016",
+          "D017"
+        ]
+      },
+      {
+        "ticket_id": "T012",
+        "start": 14,
+        "end": 16,
+        "premises": [
+          "D018"
+        ]
+      },
+      {
+        "ticket_id": "T014",
+        "start": 18,
+        "end": 21,
+        "premises": [
+          "D021",
+          "D022",
+          "D023",
+          "D024"
+        ]
+      }
+    ],
+    "undated": [
+      {
+        "ticket_id": "T013",
+        "reasons": [
+          "gate_unknown"
+        ],
+        "blocking_refs": [
+          {
+            "kind": "dependency",
+            "id": "D033"
+          },
+          {
+            "kind": "dependency",
+            "id": "D034"
+          }
+        ]
+      },
+      {
+        "ticket_id": "T015",
+        "reasons": [
+          "gate_unknown",
+          "upstream_undated"
+        ],
+        "blocking_refs": [
+          {
+            "kind": "dependency",
+            "id": "D025"
+          },
+          {
+            "kind": "dependency",
+            "id": "D033"
+          },
+          {
+            "kind": "dependency",
+            "id": "D034"
+          },
+          {
+            "kind": "ticket",
+            "id": "T013"
+          }
+        ]
+      },
+      {
+        "ticket_id": "T016",
+        "reasons": [
+          "gate_unknown"
+        ],
+        "blocking_refs": [
+          {
+            "kind": "dependency",
+            "id": "D035"
+          }
+        ]
+      },
+      {
+        "ticket_id": "T017",
+        "reasons": [
+          "gate_unknown",
+          "upstream_undated"
+        ],
+        "blocking_refs": [
+          {
+            "kind": "dependency",
+            "id": "D028"
+          },
+          {
+            "kind": "dependency",
+            "id": "D033"
+          },
+          {
+            "kind": "dependency",
+            "id": "D034"
+          },
+          {
+            "kind": "dependency",
+            "id": "D036"
+          },
+          {
+            "kind": "ticket",
+            "id": "T013"
+          }
+        ]
+      },
+      {
+        "ticket_id": "T018",
+        "reasons": [
+          "gate_unknown",
+          "upstream_undated"
+        ],
+        "blocking_refs": [
+          {
+            "kind": "dependency",
+            "id": "D025"
+          },
+          {
+            "kind": "dependency",
+            "id": "D028"
+          },
+          {
+            "kind": "dependency",
+            "id": "D030"
+          },
+          {
+            "kind": "dependency",
+            "id": "D031"
+          },
+          {
+            "kind": "dependency",
+            "id": "D032"
+          },
+          {
+            "kind": "dependency",
+            "id": "D033"
+          },
+          {
+            "kind": "dependency",
+            "id": "D034"
+          },
+          {
+            "kind": "dependency",
+            "id": "D035"
+          },
+          {
+            "kind": "dependency",
+            "id": "D036"
+          },
+          {
+            "kind": "dependency",
+            "id": "D037"
+          },
+          {
+            "kind": "ticket",
+            "id": "T013"
+          },
+          {
+            "kind": "ticket",
+            "id": "T015"
+          },
+          {
+            "kind": "ticket",
+            "id": "T016"
+          },
+          {
+            "kind": "ticket",
+            "id": "T017"
+          }
+        ]
+      }
+    ],
+    "potential_parallel": [
+      {
+        "ticket_ids": [
+          "T002",
+          "T005"
+        ],
+        "conditions": [
+          "D001",
+          "D004"
+        ]
+      },
+      {
+        "ticket_ids": [
+          "T003",
+          "T004",
+          "T006"
+        ],
+        "conditions": [
+          "D002",
+          "D003",
+          "D005"
+        ]
+      },
+      {
+        "ticket_ids": [
+          "T007",
+          "T008",
+          "T011",
+          "T013"
+        ],
+        "conditions": [
+          "D006",
+          "D007",
+          "D008",
+          "D009",
+          "D010",
+          "D015",
+          "D016",
+          "D017",
+          "D019",
+          "D020",
+          "D033",
+          "D034"
+        ]
+      },
+      {
+        "ticket_ids": [
+          "T009",
+          "T012",
+          "T016"
+        ],
+        "conditions": [
+          "D011",
+          "D012",
+          "D013",
+          "D018",
+          "D027",
+          "D035"
+        ]
+      },
+      {
+        "ticket_ids": [
+          "T015",
+          "T017"
+        ],
+        "conditions": [
+          "D025",
+          "D026",
+          "D028",
+          "D029",
+          "D036"
+        ]
+      }
+    ]
+  }
+}

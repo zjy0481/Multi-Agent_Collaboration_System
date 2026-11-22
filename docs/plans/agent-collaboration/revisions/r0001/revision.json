@@ -1,0 +1,120 @@
+{
+  "format": "PP-1",
+  "plan_id": "pp-ba8ebd7d-1a02-4703-9797-328c57f1d5ff",
+  "revision": "r0001",
+  "parent_revision": null,
+  "basis": [
+    {
+      "id": "REQ",
+      "ref": "../../../../grill_result/agent-collaboration/requirement.md",
+      "scope": "定稿业务范围、验收和复用依据",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "185a8b6666f26e5b0673feb618b71f4453a9a0b092c7d9e23e9eda8af5761d77"
+    },
+    {
+      "id": "DOMAIN",
+      "ref": "../../../../grill_result/agent-collaboration/domain-model.md",
+      "scope": "既有领域模型",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "d850e702473316019e723883898eb6e855d2922cb47d2b06e7d63f45a23a77d4"
+    },
+    {
+      "id": "RUNTIME",
+      "ref": "../../../../grill_result/agent-collaboration/runtime-contract.md",
+      "scope": "现有运行时约束",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "17363d7c081313f84923364a3814798a1e7d218e12a3e2f934049b01b450eb26"
+    },
+    {
+      "id": "DESIGN",
+      "ref": "../../../../preliminary-proposal.md",
+      "scope": "工具入口、课程场景和交付约束",
+      "confirmation": "继承来源",
+      "completeness": null,
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "d588cfac7739633d8e6b9ea2d0c9984c9b63215c3f1d10c4010717843f6fbb92"
+    },
+    {
+      "id": "COURSE",
+      "ref": "../../../../raw/basic_requirement.md",
+      "scope": "课程硬约束和评测交付",
+      "confirmation": "课程原文",
+      "completeness": null,
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "241e7a58dac3ecfc4e6293bd7c96f3f2577e47e4aa8ad416d24425f5fb76a786"
+    },
+    {
+      "id": "SAMPLES",
+      "ref": "../../../../../test samples/README.md",
+      "scope": "三个官方样例的角色与连续任务",
+      "confirmation": "课程样例",
+      "completeness": null,
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "9bc106f579ba7fbc3ee536b83d390c906e64cff69294c915e65134f7a3b9134b"
+    },
+    {
+      "id": "PREF",
+      "ref": "../../../../workflow-preferences.md",
+      "scope": "主题内文档偏好",
+      "confirmation": "已接受",
+      "completeness": null,
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "db14774e36d404015c0fe2e1002948490a4576f4303dbcd9b14f4abb70ddadd1"
+    }
+  ],
+  "content_files": {
+    "specs/S001.md": "c026bd9adef78340b9f0315280e7ef31861434f308cc45a5797f90e517e107f8",
+    "specs/S002.md": "cbbf6518087cb93c109182fe3c0a8218f094a0bd5acef282612732077d6c6c3d",
+    "specs/S003.md": "63bae6ec457346a40f9d5d7005c29e7d99361bc0c613133b6d713cb8ae927187",
+    "specs/S004.md": "0002ae8a10cc011371e248afc8b7e7807da581971245b502240cdef5bfa0d82d"
+  },
+  "baseline_state": "draft",
+  "checks": {
+    "result": "incomplete",
+    "basis_digest": null,
+    "command": "Python read-only validation of source hashes, spec hashes, local links and anchors, and draft pointer",
+    "evidence_ref": null
+  },
+  "independent_review": {
+    "result": "incomplete",
+    "reviewer": {
+      "agent_id": "01a2032c-03bf-7900-bf44-1a0ae3ea564a",
+      "method": "spec-review",
+      "scope": "S001–S004 首轮独立规格审阅及两轮定点补审，适用当前规格阶段"
+    },
+    "input_files": {
+      "specs/S001.md": "c026bd9adef78340b9f0315280e7ef31861434f308cc45a5797f90e517e107f8",
+      "specs/S002.md": "cbbf6518087cb93c109182fe3c0a8218f094a0bd5acef282612732077d6c6c3d",
+      "specs/S003.md": "63bae6ec457346a40f9d5d7005c29e7d99361bc0c613133b6d713cb8ae927187",
+      "specs/S004.md": "0002ae8a10cc011371e248afc8b7e7807da581971245b502240cdef5bfa0d82d",
+      "../../../../grill_result/agent-collaboration/requirement.md": "185a8b6666f26e5b0673feb618b71f4453a9a0b092c7d9e23e9eda8af5761d77",
+      "../../../../grill_result/agent-collaboration/domain-model.md": "d850e702473316019e723883898eb6e855d2922cb47d2b06e7d63f45a23a77d4",
+      "../../../../grill_result/agent-collaboration/runtime-contract.md": "17363d7c081313f84923364a3814798a1e7d218e12a3e2f934049b01b450eb26",
+      "../../../../preliminary-proposal.md": "d588cfac7739633d8e6b9ea2d0c9984c9b63215c3f1d10c4010717843f6fbb92",
+      "../../../../raw/basic_requirement.md": "241e7a58dac3ecfc4e6293bd7c96f3f2577e47e4aa8ad416d24425f5fb76a786",
+      "../../../../../test samples/README.md": "9bc106f579ba7fbc3ee536b83d390c906e64cff69294c915e65134f7a3b9134b",
+      "../../../../workflow-preferences.md": "db14774e36d404015c0fe2e1002948490a4576f4303dbcd9b14f4abb70ddadd1"
+    },
+    "findings": [
+      "review.md#F001",
+      "review.md#F002",
+      "review.md#F003",
+      "review.md#F004",
+      "review.md#F005",
+      "review.md#F006"
+    ]
+  },
+  "confirmations": [],
+  "changes": [
+    {
+      "scope": "S001–S004",
+      "reason": "首轮审阅发现已完成两轮定点补审。候选规格含三项待确认的业务边界。"
+    }
+  ]
+}

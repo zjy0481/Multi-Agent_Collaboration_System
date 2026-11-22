@@ -1,0 +1,176 @@
+{
+  "format": "PP-1",
+  "plan_id": "pp-ba8ebd7d-1a02-4703-9797-328c57f1d5ff",
+  "revision": "r0003",
+  "parent_revision": null,
+  "basis": [
+    {
+      "id": "REQ",
+      "ref": "../../../../grill_result/agent-collaboration/requirement.md",
+      "scope": "定稿业务范围、验收和复用依据。本轮以工作区内容及 SHA-256 标识版本。",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": "sha256:e43acd2902d3f57fef5e244949a0fba2a95db5e997b3b7001558727d8fa96038",
+      "sha256": "e43acd2902d3f57fef5e244949a0fba2a95db5e997b3b7001558727d8fa96038"
+    },
+    {
+      "id": "DOMAIN",
+      "ref": "../../../../grill_result/agent-collaboration/domain-model.md",
+      "scope": "既有领域模型。本轮以工作区内容及 SHA-256 标识版本。",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": "sha256:f7c2436b2e2e7a4032a6c3e3eca13deca141dd2ff2f22edaab13df19f8f9dd69",
+      "sha256": "f7c2436b2e2e7a4032a6c3e3eca13deca141dd2ff2f22edaab13df19f8f9dd69"
+    },
+    {
+      "id": "RUNTIME",
+      "ref": "../../../../grill_result/agent-collaboration/runtime-contract.md",
+      "scope": "现有运行时约束。本轮以工作区内容及 SHA-256 标识版本。",
+      "confirmation": "已定稿",
+      "completeness": "设计完备",
+      "version": "sha256:1b85281943c5450667a1f1a9f31203920e8444caacb39928dfbe9f9abe93d5fa",
+      "sha256": "1b85281943c5450667a1f1a9f31203920e8444caacb39928dfbe9f9abe93d5fa"
+    },
+    {
+      "id": "DESIGN",
+      "ref": "../../../../preliminary-proposal.md",
+      "scope": "工具入口、课程场景和交付约束。本轮以工作区内容及 SHA-256 标识版本。",
+      "confirmation": "继承来源",
+      "completeness": "范围内可用",
+      "version": "sha256:02d46e98bbf0ce8a6c133d73d151d301cb1b2ff87897c1dfe47c68436b1ed082",
+      "sha256": "02d46e98bbf0ce8a6c133d73d151d301cb1b2ff87897c1dfe47c68436b1ed082"
+    },
+    {
+      "id": "COURSE",
+      "ref": "../../../../raw/basic_requirement.md",
+      "scope": "课程硬约束和评测交付",
+      "confirmation": "课程原文",
+      "completeness": "范围内可用",
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "241e7a58dac3ecfc4e6293bd7c96f3f2577e47e4aa8ad416d24425f5fb76a786"
+    },
+    {
+      "id": "SAMPLES",
+      "ref": "../../../../../test samples/README.md",
+      "scope": "三个官方样例的角色与连续任务",
+      "confirmation": "课程样例",
+      "completeness": "范围内可用",
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "9bc106f579ba7fbc3ee536b83d390c906e64cff69294c915e65134f7a3b9134b"
+    },
+    {
+      "id": "PREF",
+      "ref": "../../../../workflow-preferences.md",
+      "scope": "主题内文档偏好",
+      "confirmation": "已接受",
+      "completeness": "范围内可用",
+      "version": "2711f98b13f31f62a69f71be3d8c9226f160c25c",
+      "sha256": "db14774e36d404015c0fe2e1002948490a4576f4303dbcd9b14f4abb70ddadd1"
+    }
+  ],
+  "content_files": {
+    "../../../../../test samples/README.md": "9bc106f579ba7fbc3ee536b83d390c906e64cff69294c915e65134f7a3b9134b",
+    "../../../../grill_result/agent-collaboration/domain-model.md": "f7c2436b2e2e7a4032a6c3e3eca13deca141dd2ff2f22edaab13df19f8f9dd69",
+    "../../../../grill_result/agent-collaboration/requirement.md": "e43acd2902d3f57fef5e244949a0fba2a95db5e997b3b7001558727d8fa96038",
+    "../../../../grill_result/agent-collaboration/runtime-contract.md": "1b85281943c5450667a1f1a9f31203920e8444caacb39928dfbe9f9abe93d5fa",
+    "../../../../preliminary-proposal.md": "02d46e98bbf0ce8a6c133d73d151d301cb1b2ff87897c1dfe47c68436b1ed082",
+    "../../../../raw/basic_requirement.md": "241e7a58dac3ecfc4e6293bd7c96f3f2577e47e4aa8ad416d24425f5fb76a786",
+    "../../../../workflow-preferences.md": "db14774e36d404015c0fe2e1002948490a4576f4303dbcd9b14f4abb70ddadd1",
+    "plan.json": "81482f175ccbcac957db87244dbb6b68a85a3e0beefd7814c19d363b01f48fb6",
+    "plan.md": "4b7dabdd219b70a70855c0c6d72c3e58b3101d059fa783b9e463984400d11745",
+    "specs/S001.md": "29d77ef61f8ee5a3bdfb9ba8f39888ab26248f21c789366d0169ab3447fd5ca2",
+    "specs/S002.md": "cbbf6518087cb93c109182fe3c0a8218f094a0bd5acef282612732077d6c6c3d",
+    "specs/S003.md": "63bae6ec457346a40f9d5d7005c29e7d99361bc0c613133b6d713cb8ae927187",
+    "specs/S004.md": "f3d27ffbe2f38deec0b5cb933c98eed2ffc2e3aa97a31baeb75b431a0d943c63",
+    "tickets/T001.md": "8f43499d591433fa598bf97aeaefa650cfaea460469fef32551a5ba05a33c61c",
+    "tickets/T002.md": "af8d6b09937b41f75226e93aee8a03c9c906f0e83576948d9ff31031cd396e1c",
+    "tickets/T003.md": "b6890aa185211b71e056203fd43e68e8b170a690e13b90a9097b272f38014ea2",
+    "tickets/T004.md": "530d9e5e866558e11cc026b91eb314bf9cabec37d517cf649a77e83f5775de89",
+    "tickets/T005.md": "e4295fc54299f3875e8bb92b18030c0472e0f356ffa82f2e3a11ee0ba3bb04e4",
+    "tickets/T006.md": "76807d22479b0d2ef3c67b073f8a6f895d5cb004e18d10216873b9ecc68a5ffb",
+    "tickets/T007.md": "29bd7bd7c5ec5d63d19c985ae4653a2d44a19becfe6032dc3ee12106a3f2472f",
+    "tickets/T008.md": "8100fb5b84d02bcacb1de2dd8048e97d45b77f3df33b25a88b5cbec3893a3ae1",
+    "tickets/T009.md": "dd76a07a570d45cb35befd2f27e1daa92d17b3ba6a7b0b0f0dfc15012a4f98f8",
+    "tickets/T010.md": "d440ed5bf032cf85a285df22678185f76fa8bdcfacd8075ef3c1733c194813ee",
+    "tickets/T011.md": "ceb78ccffa294ee13b52a49c18358be9a6f2d3f48eb1224d0da8c60556b00493",
+    "tickets/T012.md": "af0c36cec1e95312aa0a0f6c2342986260b49f93f383d5195b1d26a23371431d",
+    "tickets/T013.md": "8fc750442551cc2f70d5b765310e571002c7c94e3f4e0821e2dc2d24ace766a7",
+    "tickets/T014.md": "bbfaf9754897a7fec034ef9cc5873ce20db701de1fe9db04fa0bcf23d1625326",
+    "tickets/T015.md": "dc6247d692868aac40eaeedc179eb0b136a8626954abf87a37c171b80959e5dc",
+    "tickets/T016.md": "cd3bc8d735f254523a2510e70a89cc08ac30e8ef8381c8e1c3bbac2883e126e2",
+    "tickets/T017.md": "593d7d4c7b38754b9bbff7b5cdc4d7fcd0803a918283f0baa7349fbb053bacb4",
+    "tickets/T018.md": "3a6f2aafee19a28a7a40a301ef9099a76194951920c6f7f8eeb4be17da6ffc82"
+  },
+  "baseline_state": "accepted",
+  "checks": {
+    "result": "passed",
+    "basis_digest": "607f2dbeec7445e7366a0a993dab73b1ece378477ca7761834c522331e4a3914",
+    "command": "project-planner/scripts/plan.py check revisions/r0003",
+    "evidence_ref": null
+  },
+  "independent_review": {
+    "result": "passed",
+    "reviewer": "01a2032c-03bf-7900-bf44-1a0ae3ea564a",
+    "input_files": {
+      "../../../../../test samples/README.md": "9bc106f579ba7fbc3ee536b83d390c906e64cff69294c915e65134f7a3b9134b",
+      "../../../../grill_result/agent-collaboration/domain-model.md": "f7c2436b2e2e7a4032a6c3e3eca13deca141dd2ff2f22edaab13df19f8f9dd69",
+      "../../../../grill_result/agent-collaboration/requirement.md": "e43acd2902d3f57fef5e244949a0fba2a95db5e997b3b7001558727d8fa96038",
+      "../../../../grill_result/agent-collaboration/runtime-contract.md": "1b85281943c5450667a1f1a9f31203920e8444caacb39928dfbe9f9abe93d5fa",
+      "../../../../preliminary-proposal.md": "02d46e98bbf0ce8a6c133d73d151d301cb1b2ff87897c1dfe47c68436b1ed082",
+      "../../../../raw/basic_requirement.md": "241e7a58dac3ecfc4e6293bd7c96f3f2577e47e4aa8ad416d24425f5fb76a786",
+      "../../../../workflow-preferences.md": "db14774e36d404015c0fe2e1002948490a4576f4303dbcd9b14f4abb70ddadd1",
+      "plan.json": "81482f175ccbcac957db87244dbb6b68a85a3e0beefd7814c19d363b01f48fb6",
+      "plan.md": "4b7dabdd219b70a70855c0c6d72c3e58b3101d059fa783b9e463984400d11745",
+      "specs/S001.md": "29d77ef61f8ee5a3bdfb9ba8f39888ab26248f21c789366d0169ab3447fd5ca2",
+      "specs/S002.md": "cbbf6518087cb93c109182fe3c0a8218f094a0bd5acef282612732077d6c6c3d",
+      "specs/S003.md": "63bae6ec457346a40f9d5d7005c29e7d99361bc0c613133b6d713cb8ae927187",
+      "specs/S004.md": "f3d27ffbe2f38deec0b5cb933c98eed2ffc2e3aa97a31baeb75b431a0d943c63",
+      "tickets/T001.md": "8f43499d591433fa598bf97aeaefa650cfaea460469fef32551a5ba05a33c61c",
+      "tickets/T002.md": "af8d6b09937b41f75226e93aee8a03c9c906f0e83576948d9ff31031cd396e1c",
+      "tickets/T003.md": "b6890aa185211b71e056203fd43e68e8b170a690e13b90a9097b272f38014ea2",
+      "tickets/T004.md": "530d9e5e866558e11cc026b91eb314bf9cabec37d517cf649a77e83f5775de89",
+      "tickets/T005.md": "e4295fc54299f3875e8bb92b18030c0472e0f356ffa82f2e3a11ee0ba3bb04e4",
+      "tickets/T006.md": "76807d22479b0d2ef3c67b073f8a6f895d5cb004e18d10216873b9ecc68a5ffb",
+      "tickets/T007.md": "29bd7bd7c5ec5d63d19c985ae4653a2d44a19becfe6032dc3ee12106a3f2472f",
+      "tickets/T008.md": "8100fb5b84d02bcacb1de2dd8048e97d45b77f3df33b25a88b5cbec3893a3ae1",
+      "tickets/T009.md": "dd76a07a570d45cb35befd2f27e1daa92d17b3ba6a7b0b0f0dfc15012a4f98f8",
+      "tickets/T010.md": "d440ed5bf032cf85a285df22678185f76fa8bdcfacd8075ef3c1733c194813ee",
+      "tickets/T011.md": "ceb78ccffa294ee13b52a49c18358be9a6f2d3f48eb1224d0da8c60556b00493",
+      "tickets/T012.md": "af0c36cec1e95312aa0a0f6c2342986260b49f93f383d5195b1d26a23371431d",
+      "tickets/T013.md": "8fc750442551cc2f70d5b765310e571002c7c94e3f4e0821e2dc2d24ace766a7",
+      "tickets/T014.md": "bbfaf9754897a7fec034ef9cc5873ce20db701de1fe9db04fa0bcf23d1625326",
+      "tickets/T015.md": "dc6247d692868aac40eaeedc179eb0b136a8626954abf87a37c171b80959e5dc",
+      "tickets/T016.md": "cd3bc8d735f254523a2510e70a89cc08ac30e8ef8381c8e1c3bbac2883e126e2",
+      "tickets/T017.md": "593d7d4c7b38754b9bbff7b5cdc4d7fcd0803a918283f0baa7349fbb053bacb4",
+      "tickets/T018.md": "3a6f2aafee19a28a7a40a301ef9099a76194951920c6f7f8eeb4be17da6ffc82"
+    },
+    "findings": [
+      "review.md#chain-review"
+    ]
+  },
+  "confirmations": [
+    {
+      "kind": "cross_ticket_design",
+      "scope": "任务写入、必需交付、队列激活",
+      "accepted_by": "user",
+      "authority_ref": "../r0002/review.md#business-decisions",
+      "decision_ref": "specs/S001.md#accepted-decisions",
+      "content_digest": "607f2dbeec7445e7366a0a993dab73b1ece378477ca7761834c522331e4a3914"
+    },
+    {
+      "kind": "breakdown",
+      "scope": "r0003 的 18 张票、票间依赖及容量为 2 的相对排期",
+      "accepted_by": "user",
+      "authority_ref": "review.md#breakdown-acceptance",
+      "decision_ref": "plan.md",
+      "content_digest": "607f2dbeec7445e7366a0a993dab73b1ece378477ca7761834c522331e4a3914"
+    }
+  ],
+  "changes": [
+    {
+      "scope": "S001–S004 与 T001–T018",
+      "reason": "以 r0002 的业务确认和规格正文为依据，首次拆票。",
+      "verification": "recheck"
+    }
+  ]
+}
