@@ -126,6 +126,13 @@ class ForkMessages:
         except (TeamNotFound, TeamConflict, CollaborationForbidden, CollaborationInvalid) as exc:
             raise WorkspaceNotFound("Assistant message scope is no longer available") from exc
 
+    @staticmethod
+    def add_delivery_versions(payload, message_id, version_ids):
+        if payload["message"]["id"] == message_id:
+            payload["message"]["version_ids"] = version_ids
+        else:
+            payload["fork_message"] = {"id": message_id, "version_ids": version_ids}
+
     def post(self, assistant_id, sender_session_id, body: ForkMessageInput):
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")

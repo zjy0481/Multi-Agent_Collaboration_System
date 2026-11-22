@@ -10,9 +10,11 @@ from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
 from collaboration_runtime.fork_messages import ForkMessageInput
+from collaboration_runtime.local_auth import OPERATOR_ID
 from collaboration_runtime.scheduler import DeliveryScheduler
-from test_collaboration import OPERATOR, Sandbox, auth, bootstrap, send
+from test_collaboration import OPERATOR, Sandbox, auth, bootstrap, send, snapshot
 from test_delegation import action, confirm_all, context, create, ok, terms
+from test_scheduler import tool
 
 
 def wait_until(fn, timeout=8):
@@ -222,6 +224,168 @@ def test_claimed_fork_delivery_rechecks_scope_before_model(fork_delivery):
     assert not model.inputs
     row = client.portal.call(lambda: runtime.db.execute("SELECT status FROM turns WHERE id = ?", (job[1],)).fetchone())
     assert row["status"] == "interrupted"
+
+
+def test_private_fork_delivery_cannot_be_used_to_ask_human(fork_delivery):
+    (client, runtime, scheduler, model, drain, base, _, contact, _,
+     _, _, _, helper, artifact, _) = fork_delivery
+    original = post_fork_delivery(client, runtime, helper, contact, artifact["version_id"])
+
+    async def ask_once(messages, tools):
+        message = messages[-1]
+        if message["role"] == "tool":
+            model.inputs.append(json.loads(message["content"]))
+            return {"role": "assistant", "content": "Private thread kept private"}
+        return tool("ask_human", "private-fork-question", {"request_id": uuid4().hex,
+                    "source_message_id": original["message_id"], "text": "Generic question"})
+
+    model.complete = ask_once
+    client.portal.call(drain, scheduler._claim_one)
+    assert len(model.inputs) == 1 and model.inputs[0]["status"] == 403
+    assert client.get(f"{base}/messages/{original['message_id']}", headers=auth(OPERATOR)).status_code == 404
+    assert not snapshot(client, base, OPERATOR)["questions"]
+
+
+def seed_persisted_fork_question(client, runtime, contact, message):
+    """Build compatibility state in the isolated test DB, not through the private-message API."""
+    def persist():
+        chat = runtime.collaboration
+        actor = chat.auth.member(contact["session_id"])
+        with runtime.db:
+            question = chat._create_message(actor.team_id, actor, recipient=OPERATOR_ID,
+                                            text="Generic fixture question", kind="question",
+                                            mentions=[], reply_to=message["message_id"])
+            runtime.db.execute("""
+                INSERT INTO human_questions(question_id, asker_id, source_message_id, work_event_id,
+                                            session_id, work_purpose)
+                VALUES (?, ?, ?, ?, ?, 'fork.message')
+            """, (question["message_id"], actor.id, message["message_id"], message["event_id"], actor.session_id))
+            runtime.db.execute("""
+                UPDATE message_deliveries SET status = 'blocked'
+                WHERE event_id = ? AND session_id = ? AND purpose = 'fork.message'
+            """, (message["event_id"], actor.session_id))
+        return question["message_id"]
+
+    return client.portal.call(persist)
+
+
+@pytest.mark.parametrize("second_state", ["valid", "legacy-recovery", "revoked"])
+def test_persisted_fork_clarification_keeps_origin_across_answers(fork_delivery, second_state):
+    (client, runtime, scheduler, model, drain, base, lead_token, contact, tokens,
+     _, _, _, helper, artifact, newer) = fork_delivery
+    original = post_fork_delivery(client, runtime, helper, contact, artifact["version_id"])
+    first_question = seed_persisted_fork_question(client, runtime, contact, original)
+    first_answer = send(client, base, OPERATOR, request_id=uuid4().hex, text="First answer", reply_to=first_question)
+
+    async def ask_again(messages, tools):
+        payload = json.loads(messages[-1]["content"])
+        model.inputs.append(payload)
+        return tool("ask_human", "second-fork-question", {"request_id": uuid4().hex,
+                    "source_message_id": payload["message"]["id"], "text": "Generic follow-up question"})
+
+    complete = model.complete
+    model.complete = ask_again
+    client.portal.call(drain, scheduler._claim_one)
+    model.complete = complete
+    second_question, = [question for question in snapshot(client, base, OPERATOR)["questions"]
+                        if question["source_message_id"] == first_answer["message_id"]]
+    second_answer = send(client, base, OPERATOR, request_id=uuid4().hex, text="Second answer",
+                         reply_to=second_question["question_id"])
+    if second_state == "revoked":
+        ok(client.post(f"/v1/forks/{helper}/revoke", headers=auth(lead_token), json={"request_id": uuid4().hex}))
+    elif second_state == "legacy-recovery":
+        def recover_legacy_continuation():
+            _, turn_id, _, _ = scheduler._claim_one()
+            checkpoint = runtime.journal.checkpoint(turn_id)
+            history = checkpoint["history"]
+            payload = json.loads(history[0]["content"])
+            payload.pop("fork_message", None)
+            history[0]["content"] = json.dumps(payload)
+            with runtime.db:
+                assert runtime.journal.advance(turn_id, checkpoint["generation"], checkpoint["step"],
+                                               checkpoint["phase"], history)
+                runtime._write_finish(turn_id, "recoverable", error="fixture restart")
+
+        client.portal.call(recover_legacy_continuation)
+    client.portal.call(drain, scheduler._claim_one)
+    assert len(model.inputs) == (1 if second_state == "revoked" else 2)
+    expected = {"id": original["message_id"], "version_ids": [artifact["version_id"]]}
+    first_input = model.inputs[0]
+    assert first_input["fork_message"] == expected
+    assert first_input["source_message"]["id"] == original["message_id"]
+    if second_state != "revoked":
+        second_input = json.loads(model.inputs[1])
+        assert second_input["fork_message"] == expected
+        assert second_input["source_message"]["id"] == first_answer["message_id"]
+        assert second_input["message"]["id"] == second_answer["message_id"]
+    assert newer["version_id"] not in json.dumps(model.inputs)
+    token = tokens[contact["member_id"]]
+    assert ok(client.get(f"{base}/messages/{second_answer['message_id']}", headers=auth(token)))["text"] == "Second answer"
+
+
+@pytest.mark.parametrize("boundary", ["late-answer", "pending", "recoverable", "claimed", "model-result"])
+def test_persisted_fork_clarification_checks_scope_at_execution_boundaries(fork_delivery, boundary):
+    (client, runtime, scheduler, model, drain, base, lead_token, contact, _,
+     _, _, _, helper, artifact, _) = fork_delivery
+    original = post_fork_delivery(client, runtime, helper, contact, artifact["version_id"])
+    question = seed_persisted_fork_question(client, runtime, contact, original)
+
+    def revoke():
+        ok(client.post(f"/v1/forks/{helper}/revoke", headers=auth(lead_token), json={"request_id": uuid4().hex}))
+
+    if boundary == "late-answer":
+        revoke()
+    answer = send(client, base, OPERATOR, request_id=uuid4().hex, text="Recorded answer", reply_to=question)
+    if boundary in {"recoverable", "claimed", "model-result"}:
+        claim = client.portal.call(scheduler._claim_one)
+        assert claim and claim[0] == contact["session_id"]
+    if boundary == "recoverable":
+        client.portal.call(lambda: runtime._finish(claim[1], "recoverable", error="fixture restart"))
+    if boundary in {"pending", "recoverable", "claimed"}:
+        revoke()
+
+    started = threading.Event()
+    release = threading.Event()
+
+    async def finish_with_tool(messages, tools):
+        if messages[-1]["role"] == "tool":
+            return {"role": "assistant", "content": "Unexpected tool ran"}
+        model.inputs.append(messages[-1]["content"])
+        started.set()
+        assert await asyncio.to_thread(release.wait, 8)
+        return tool("send_message", "late-fixture-tool", {"request_id": uuid4().hex, "text": "Late fixture message"})
+
+    async def run_claimed():
+        runtime.launch(*claim)
+        await runtime.active[claim[0]].task
+
+    if boundary == "model-result":
+        model.complete = finish_with_tool
+        running = client.portal.start_task_soon(run_claimed)
+        try:
+            assert started.wait(8)
+            revoke()
+        finally:
+            release.set()
+
+        running.result(timeout=8)
+    elif boundary == "claimed":
+        client.portal.call(run_claimed)
+    else:
+        client.portal.call(drain, scheduler._claim_one)
+
+    assert len(model.inputs) == (1 if boundary == "model-result" else 0)
+    history = snapshot(client, base, OPERATOR)
+    assert any(item["id"] == answer["message_id"] for item in history["messages"])
+    assert all(item["text"] != "Late fixture message" for item in history["messages"])
+    delivery, turn = client.portal.call(lambda: tuple(runtime.db.execute("""
+        SELECT d.status, t.status FROM message_deliveries d
+        LEFT JOIN scheduled_turns s USING (event_id, session_id, purpose)
+        LEFT JOIN turns t ON t.id = s.turn_id
+        WHERE d.message_id = ?
+    """, (answer["message_id"],)).fetchone()))
+    assert delivery == ("interrupted" if boundary in {"claimed", "model-result"} else "failed")
+    assert turn == ("interrupted" if boundary in {"recoverable", "claimed", "model-result"} else None)
 
 
 def test_fork_history_authorization_parallel_replay_and_revocation(tmp_path):

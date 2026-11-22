@@ -54,7 +54,9 @@ class DeliveryScheduler:
                 session = delivery['session_id']
                 if session in self.runtime.active:
                     continue
+                fork_message_id = None
                 try:
+                    fork_message_id = self.collaboration.fork_message_for_delivery(delivery)
                     principal = self.collaboration.auth.member(session)
                     if principal is None or principal.team_id != delivery['team_id']:
                         raise WorkspaceNotFound('Delivery identity unavailable')
@@ -62,8 +64,8 @@ class DeliveryScheduler:
                     if actor.team_id != delivery['team_id']:
                         raise WorkspaceNotFound('Workspace identity unavailable')
                     version_ids = None
-                    if delivery['purpose'] == 'fork.message':
-                        version_ids = self.runtime.fork_messages.authorize_message(session, delivery['message_id'])
+                    if fork_message_id is not None:
+                        version_ids = self.runtime.fork_messages.authorize_message(session, fork_message_id)
                     if delivery['turn_id'] is not None:
                         self.collaboration.get_message(delivery['team_id'], principal, delivery['message_id'])
                         self.runtime.reopen_turn(delivery['turn_id'])
@@ -71,7 +73,7 @@ class DeliveryScheduler:
                     else:
                         payload = self.collaboration.execution_input(delivery, principal)
                         if version_ids is not None:
-                            payload['message']['version_ids'] = version_ids
+                            self.runtime.fork_messages.add_delivery_versions(payload, fork_message_id, version_ids)
                         text = json.dumps(payload, ensure_ascii=False)
                         turn_id = self.runtime.create_turn(session, text)
                         self.db.execute('''INSERT INTO scheduled_turns(turn_id, event_id, session_id, purpose)
@@ -89,7 +91,7 @@ class DeliveryScheduler:
                                        WHERE event_id = ? AND session_id = ? AND purpose = ?''',
                                     (delivery['event_id'], session, delivery['purpose']))
                     if delivery['turn_id'] is not None:
-                        if delivery['purpose'] == 'fork.message':
+                        if fork_message_id is not None:
                             self.runtime._write_finish(delivery['turn_id'], 'interrupted', error='Fork delivery scope ended')
                         else:
                             self.db.execute("UPDATE turns SET status = 'interrupted', error = ? WHERE id = ? AND status = 'recoverable'",

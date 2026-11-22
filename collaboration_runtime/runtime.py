@@ -8,6 +8,7 @@ from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from .collaboration import CollaborationInvalid
 from .delegation_tools import TOOLS as DELEGATION_TOOLS
 from .journal import ExecutionJournal
 from .model import ModelError
@@ -265,21 +266,23 @@ class Runtime:
     async def _run(self, role: str, turn: ActiveTurn, prompt, workspace_id):
         scheduled = self._scheduled(turn.id)
         is_fork = self.forks is not None and self.forks.exists(role)
-        fork_delivery = self.db.execute("""
-            SELECT d.message_id FROM scheduled_turns s JOIN message_deliveries d USING (event_id, session_id, purpose)
-            WHERE s.turn_id = ? AND d.purpose = 'fork.message'
-        """, (turn.id,)).fetchone() if scheduled else None
+        fork_message_id = None
 
         def check_scope():
             if is_fork:
                 self._check_assistant_job(role, turn.id)
-            elif fork_delivery is not None:
-                return self.fork_messages.authorize_message(role, fork_delivery["message_id"])
+            elif fork_message_id is not None:
+                return self.fork_messages.authorize_message(role, fork_message_id)
 
         try:
             instructions = prompt if prompt is not None else ROLES[role]
             if scheduled:
                 instructions += DELIVERY_PROMPT
+                delivery = self.db.execute("""
+                    SELECT d.* FROM scheduled_turns s JOIN message_deliveries d USING (event_id, session_id, purpose)
+                    WHERE s.turn_id = ?
+                """, (turn.id,)).fetchone()
+                fork_message_id = self.collaboration.fork_message_for_delivery(delivery)
             version_ids = check_scope()
             if is_fork:
                 instructions += (
@@ -295,16 +298,15 @@ class Runtime:
             current, step, phase = (checkpoint[key] for key in ("history", "step", "phase"))
             if version_ids is not None:
                 payload = json.loads(current[0]["content"])
-                if payload["message"].get("version_ids") != version_ids:
-                    payload["message"]["version_ids"] = version_ids
-                    current[0]["content"] = json.dumps(payload, ensure_ascii=False)
+                self.fork_messages.add_delivery_versions(payload, fork_message_id, version_ids)
+                current[0]["content"] = json.dumps(payload, ensure_ascii=False)
             while phase == "tools" or step < self.max_steps:
                 self._check_generation(turn)
                 check_scope()
                 if phase == "tools":
                     pause = None
                     for position, call in enumerate(current[-1].get("tool_calls") or []):
-                        if fork_delivery is not None:
+                        if fork_message_id is not None:
                             check_scope()
                         result, pause = await self._apply_tool(
                             role, turn, step, position, call, workspace_id, scheduled=scheduled, pause=pause,
@@ -337,7 +339,7 @@ class Runtime:
                 assistant = await self.model.complete(prior + current, tools)
                 self._check_generation(turn)
                 check_scope()
-                if not is_fork and fork_delivery is None and workspace_id is not None:
+                if not is_fork and fork_message_id is None and workspace_id is not None:
                     self.workspace_tools.actor(role)
                 current.append(assistant)
                 count = len(assistant.get("tool_calls") or [])
@@ -365,7 +367,7 @@ class Runtime:
                 if self.journal.current(turn.id, turn.generation):
                     self._event(turn.id, "model.failed", generation=turn.generation, error=str(exc))
                     self._write_finish(turn.id, "failed", error=str(exc))
-        except WorkspaceNotFound:
+        except (WorkspaceNotFound, CollaborationInvalid):
             if self.journal.current(turn.id, turn.generation):
                 self._finish(turn.id, "interrupted", error="Execution workspace is no longer available")
         except asyncio.CancelledError:

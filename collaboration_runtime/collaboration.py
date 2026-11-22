@@ -392,6 +392,22 @@ class CollaborationService:
         delivery["source_message_id"] = answers[0]["source_message_id"]
         delivery["answer_message_ids"] = [row["answer_message_id"] for row in answers]
 
+    def fork_message_for_delivery(self, delivery):
+        while delivery["purpose"] == "clarification.resume":
+            delivery = self.db.execute("""
+                SELECT work.event_id, work.message_id, work.session_id, work.purpose
+                FROM team_messages answer JOIN human_questions q
+                    ON q.question_id = answer.reply_to AND q.answer_message_id = answer.id
+                JOIN message_deliveries work ON work.event_id = q.work_event_id
+                    AND work.session_id = q.session_id AND work.purpose = q.work_purpose
+                    AND work.message_id = q.source_message_id
+                WHERE answer.id = ? AND work.session_id = ? AND work.event_id < ?
+            """, (delivery["message_id"], delivery["session_id"], delivery["event_id"])).fetchone()
+            if delivery is None:
+                raise CollaborationInvalid("The continuation has no recorded source delivery")
+        if delivery["purpose"] == "fork.message":
+            return delivery["message_id"]
+
     def execution_input(self, delivery, actor):
         if delivery["session_id"] != actor.session_id:
             raise CollaborationForbidden("Work belongs to another session")
