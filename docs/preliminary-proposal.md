@@ -2,11 +2,11 @@
 
 2026 年 11 月 22 日 · 团队现行设计
 
-详细行为、验收条件和运行时接口以[首版详细需求](grill_result/agent-collaboration/requirement.md)、[领域模型](grill_result/agent-collaboration/domain-model.md)和[运行时对接设计](grill_result/agent-collaboration/runtime-contract.md)为准。
+详细行为、验收条件和运行时接口以[详细需求](grill_result/agent-collaboration/requirement.md)、[领域模型](grill_result/agent-collaboration/domain-model.md)和[运行时对接设计](grill_result/agent-collaboration/runtime-contract.md)为准。
 
 ## 1. 项目目标与使用流程
 
-用户把一个目标交给团队，成员自行决定如何拆解、谁接手、需要向用户问什么，以及如何证明工作已经完成。首版在一台主机上运行，由 Python 后端直接调用课程指定的 DeepSeek 或 HKGAI 服务，SQLite 保存协作记录，Docker 提供私有执行环境，用户通过极简网页参与。软件开发、新闻编辑和基金研究共用同一套程序，只更换成员配置和题目。[课程要求](raw/basic_requirement.md) · [官方样例说明](<../test samples/README.md>)
+用户把一个目标交给团队，成员自行决定如何拆解、谁接手、需要向用户问什么，以及如何证明工作已经完成。平台在一台主机上运行，由 Python 后端直接调用课程指定的 DeepSeek 或 HKGAI 服务，SQLite 保存协作记录，Docker 提供私有执行环境，用户通过极简网页参与。软件开发、新闻编辑和基金研究共用同一套程序，只更换成员配置和题目。[课程要求](raw/basic_requirement.md) · [官方样例说明](<../test samples/README.md>)
 
 用户打开团队群即可发题。Lead 接住未点名的需求，成员随后通过群聊、私聊、实际工具调用和版本交接推进工作。用户随时可以补充要求、直接联系某人、引用问题作答或查看某次验收的材料。第一题完成后，用户在原群发布第二题。团队继续使用已有成员、工作分配契约、获准共享的成果和各成员自己的经验。
 
@@ -96,7 +96,7 @@
 
 可让两名助手异步起草初次委托或修订，向各自主代理交回同一份草案、相对现行约定的变化和需要决定的事项。由承担承诺的正式角色确认后，才登记任务或更新修订。若助手基于第 3 版协商，返回时现行版本已是第 4 版，它应先核对差异、重新谈妥受影响条款。确认前继续使用现行约定，草案与讨论留作追溯。
 
-用户已确认首版支持从指定的已完成回合创建子代理分支。检查点、按来源授权的历史继承、独立执行、同题续问及草案审查的联调条件见[运行时对接设计](grill_result/agent-collaboration/runtime-contract.md)。若多个成员反复需要直接向同一助手委派工作，可交由 Lead 判断这是否已成为团队的长期职责。
+平台支持从指定的已完成回合创建子代理分支。检查点、按来源授权的历史继承、独立执行、同题续问及草案审查的联调条件见[运行时对接设计](grill_result/agent-collaboration/runtime-contract.md)。若多个成员反复需要直接向同一助手委派工作，可交由 Lead 判断这是否已成为团队的长期职责。
 
 ## 6. 运行时、存储与故障恢复
 
