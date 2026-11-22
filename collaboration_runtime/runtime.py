@@ -1,13 +1,14 @@
 """Persisted execution sessions and the model/tool loop."""
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import json
 import logging
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
 
+from .journal import ExecutionJournal
 from .model import ModelError
 from .sandbox import SandboxError
 from .workspace import WorkspaceNotFound
@@ -63,10 +64,31 @@ class TurnConflict(Exception):
     """A session already has a turn, or its active turn has changed."""
 
 
+class StaleTurn(Exception):
+    """A different generation owns this turn."""
+
+
+class UnknownToolOutcome(Exception):
+    """An interrupted tool must be checked before the work can continue."""
+
+
+# These tools either only read or enforce their own stable business request key.
+REPLAYABLE_TOOLS = {
+    "ask_human", "get_message", "list_participants", "register_goal", "send_message",
+    "list_artifacts", "list_workspace_readers", "read_artifact", "read_file", "get_search_result",
+}
+
+DELIVERY_PROMPT = (
+    "\n\nThe host provides an authenticated delivery as JSON in the current input. "
+    "Read message.text as the incoming message. Use its actual message.id if ask_human needs "
+    "a source. A final reply is recorded in this session; use send_message for a team-visible update."
+)
+
+
 @dataclass
 class ActiveTurn:
     id: str
-    pending: list[str] = field(default_factory=list)
+    generation: int
     task: asyncio.Task | None = None
 
 
@@ -100,9 +122,23 @@ class Runtime:
                 payload TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS events_by_turn ON events(turn_id, seq);
+            CREATE TABLE IF NOT EXISTS scheduled_turns (
+                turn_id TEXT PRIMARY KEY REFERENCES turns(id),
+                event_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL,
+                purpose TEXT NOT NULL,
+                UNIQUE (event_id, session_id, purpose),
+                FOREIGN KEY (event_id, session_id, purpose)
+                    REFERENCES message_deliveries(event_id, session_id, purpose)
+            );
         """)
-        for row in self.db.execute("SELECT id FROM turns WHERE status = 'running'").fetchall():
-            self._finish(row["id"], "interrupted", error="Server restarted during the turn")
+        self.journal = ExecutionJournal(self.db)
+        for row in self.db.execute("""
+            SELECT t.id, s.turn_id AS scheduled FROM turns t
+            LEFT JOIN scheduled_turns s ON s.turn_id = t.id WHERE t.status = 'running'
+        """).fetchall():
+            status = "recoverable" if row["scheduled"] is not None else "interrupted"
+            self._finish(row["id"], status, error="Server restarted during the turn")
 
     def _event(self, turn_id: str, event_type: str, **payload):
         self.db.execute(
@@ -110,34 +146,63 @@ class Runtime:
             (turn_id, event_type, json.dumps(payload, ensure_ascii=False)),
         )
 
-    def _finish(self, turn_id: str, status: str, *, reply=None, error=None, history=None):
+    def _write_finish(self, turn_id: str, status: str, *, reply=None, error=None, history=None):
+        self.db.execute(
+            "UPDATE turns SET status = ?, reply = ?, error = ?, history = ? WHERE id = ?",
+            (status, reply, error, json.dumps(history, ensure_ascii=False) if history else None, turn_id),
+        )
+        if status != "recoverable" and self._scheduled(turn_id):
+            self.db.execute("""
+                UPDATE message_deliveries SET status = ?
+                WHERE (event_id, session_id, purpose) IN (
+                    SELECT event_id, session_id, purpose FROM scheduled_turns WHERE turn_id = ?
+                ) AND status = 'running'
+            """, (status, turn_id))
+        self._event(turn_id, f"turn.{status}", reply=reply, error=error)
+
+    def _finish(self, turn_id: str, status: str, **fields):
         with self.db:
-            self.db.execute(
-                "UPDATE turns SET status = ?, reply = ?, error = ?, history = ? WHERE id = ?",
-                (status, reply, error, json.dumps(history, ensure_ascii=False) if history else None, turn_id),
-            )
-            self._event(turn_id, f"turn.{status}", reply=reply, error=error)
+            self._write_finish(turn_id, status, **fields)
+
+    def _scheduled(self, turn_id):
+        return self.db.execute("SELECT 1 FROM scheduled_turns WHERE turn_id = ?", (turn_id,)).fetchone() is not None
+
+    def create_turn(self, role, text):
+        turn_id = uuid4().hex
+        self.db.execute("INSERT INTO turns(id, role, status) VALUES (?, ?, 'running')", (turn_id, role))
+        self.journal.create(turn_id, [{"role": "user", "content": text}])
+        self._event(turn_id, "turn.started", text=text, generation=1)
+        return turn_id
+
+    def reopen_turn(self, turn_id):
+        generation = self.journal.next_generation(turn_id)
+        self.db.execute("UPDATE turns SET status = 'running', error = NULL WHERE id = ?", (turn_id,))
+        self._event(turn_id, "turn.resumed", generation=generation)
+
+    def launch(self, role, turn_id, prompt, workspace_id):
+        turn = ActiveTurn(turn_id, self.journal.checkpoint(turn_id)["generation"])
+        self.active[role] = turn
+        turn.task = asyncio.create_task(self._run(role, turn, prompt, workspace_id))
 
     def start(self, role: str, text: str, *, prompt: str | None = None, workspace_id: str | None = None) -> str:
-        if self.closing or role in self.active:
+        if self.closing or role in self.active or self.db.execute("""
+            SELECT 1 FROM turns WHERE role = ? AND status IN ('running', 'recoverable')
+        """, (role,)).fetchone():
             raise TurnConflict("The session already has a running turn or is shutting down")
-        turn = ActiveTurn(uuid4().hex)
         with self.db:
-            self.db.execute("INSERT INTO turns(id, role, status) VALUES (?, ?, 'running')", (turn.id, role))
-            self._event(turn.id, "turn.started", text=text)
-        self.active[role] = turn
-        turn.task = asyncio.create_task(self._run(role, turn, text, prompt, workspace_id))
-        return turn.id
+            turn_id = self.create_turn(role, text)
+        self.launch(role, turn_id, prompt, workspace_id)
+        return turn_id
 
     def steer(self, role: str, turn_id: str, text: str):
         turn = self.active.get(role)
         if self.closing or turn is None or turn.id != turn_id:
             raise TurnConflict("This is no longer the running turn")
-        if len(turn.pending) >= 16:
+        if len(self.journal.checkpoint(turn_id)["pending"]) >= 16:
             raise TurnConflict("The turn already has too many pending inputs")
         with self.db:
+            self.journal.queue_input(turn_id, text)
             self._event(turn_id, "turn.input_queued", text=text)
-        turn.pending.append(text)
 
     def get_turn(self, role: str, turn_id: str) -> dict | None:
         row = self.db.execute(
@@ -145,6 +210,11 @@ class Runtime:
             (role, turn_id),
         ).fetchone()
         return dict(row) if row else None
+
+    def list_turns(self, role):
+        return [dict(row) for row in self.db.execute("""
+            SELECT id AS turn_id, role, status, reply, error FROM turns WHERE role = ? ORDER BY rowid
+        """, (role,))]
 
     def events(self, turn_id: str, after: int) -> list[dict]:
         rows = self.db.execute(
@@ -163,92 +233,156 @@ class Runtime:
         )
         return [message for row in rows for message in json.loads(row["history"])]
 
-    async def _run(self, role: str, turn: ActiveTurn, text: str, prompt, workspace_id):
+    def _check_generation(self, turn):
+        if not self.journal.current(turn.id, turn.generation):
+            raise StaleTurn
+
+    def _advance(self, turn, step, phase, current):
+        if not self.journal.advance(turn.id, turn.generation, step, phase, current):
+            raise StaleTurn
+
+    async def _run(self, role: str, turn: ActiveTurn, prompt, workspace_id):
+        scheduled = self._scheduled(turn.id)
         try:
-            prior = [{"role": "system", "content": prompt if prompt is not None else ROLES[role]}, *self._history(role)]
-            current = [{"role": "user", "content": text}]
-            for step in range(1, self.max_steps + 1):
-                if self.closing:
-                    self._finish(turn.id, "interrupted", error="Server is shutting down")
-                    return
+            instructions = prompt if prompt is not None else ROLES[role]
+            if scheduled:
+                instructions += DELIVERY_PROMPT
+            prior = [{"role": "system", "content": instructions}, *self._history(role)]
+            checkpoint = self.journal.checkpoint(turn.id)
+            current, step, phase = (checkpoint[key] for key in ("history", "step", "phase"))
+            while phase == "tools" or step < self.max_steps:
+                self._check_generation(turn)
+                if phase == "tools":
+                    waiting = False
+                    for position, call in enumerate(current[-1].get("tool_calls") or []):
+                        result, waiting = await self._apply_tool(
+                            role, turn, step, position, call, workspace_id, scheduled=scheduled, waiting=waiting,
+                        )
+                        current.append({"role": "tool", "tool_call_id": call["id"],
+                                        "content": json.dumps(result, ensure_ascii=False)})
+                    phase = "model"
+                    with self.db:
+                        self._advance(turn, step, phase, current)
+                        if waiting:
+                            self._write_finish(turn.id, "waiting_human", history=current)
+                            return
+                    continue
+
                 tools = self.workspace_tools.tools_for(role) if workspace_id is not None else TOOLS
                 if workspace_id is not None and self.collaboration is not None:
                     tools.extend(self.collaboration.tools_for(role))
+                model_identity = getattr(self.model, "identity", {"mode": "injected", "endpoint": None, "model": None})
                 with self.db:
-                    for new_text in turn.pending:
+                    for new_text in self.journal.drain_inputs(turn.id, turn.generation):
                         self._event(turn.id, "turn.input_applied", text=new_text)
                         current.append({"role": "user", "content": new_text})
-                    self._event(turn.id, "model.started", step=step)
-                turn.pending.clear()
+                    self._advance(turn, step, phase, current)
+                    self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **model_identity)
                 assistant = await self.model.complete(prior + current, tools)
+                self._check_generation(turn)
                 if workspace_id is not None:
                     self.workspace_tools.actor(role)
-                calls = assistant.get("tool_calls") or []
-                if len(calls) > 8:
-                    raise ModelError("Model returned too many tools in one decision")
-                with self.db:
-                    self._event(turn.id, "model.completed", step=step, tool_count=len(calls))
                 current.append(assistant)
-                if calls:
-                    waiting = False
-                    for call in calls:
-                        waiting = await self._apply_tool(role, turn, call, current, workspace_id, waiting=waiting)
-                    if waiting:
-                        self._finish(turn.id, "waiting_human", history=current)
+                count = len(assistant.get("tool_calls") or [])
+                if count > 8:
+                    raise ModelError("Model returned too many tools in one decision")
+                step += 1
+                phase = "tools" if count else "model"
+                with self.db:
+                    self._event(turn.id, "model.completed", step=step, generation=turn.generation, tool_count=count)
+                    self._advance(turn, step, phase, current)
+                    if not count and not self.journal.checkpoint(turn.id)["pending"]:
+                        reply = assistant.get("content")
+                        if not reply or not reply.strip():
+                            raise ModelError("Model returned no reply and no tool calls")
+                        self._write_finish(turn.id, "completed", reply=reply, history=current)
                         return
-                    continue
-                reply = assistant.get("content")
-                if turn.pending:
-                    continue
-                if not reply or not reply.strip():
-                    raise ModelError("Model returned no reply and no tool calls")
-                self._finish(turn.id, "completed", reply=reply, history=current)
-                return
             self._finish(turn.id, "failed", error="Turn exceeded its model step limit")
+        except StaleTurn:
+            return
+        except UnknownToolOutcome as exc:
+            if self.journal.current(turn.id, turn.generation):
+                self._finish(turn.id, "needs_reconciliation", error=str(exc))
         except ModelError as exc:
-            self._finish(turn.id, "failed", error=str(exc))
+            with self.db:
+                if self.journal.current(turn.id, turn.generation):
+                    self._event(turn.id, "model.failed", generation=turn.generation, error=str(exc))
+                    self._write_finish(turn.id, "failed", error=str(exc))
         except WorkspaceNotFound:
-            self._finish(turn.id, "interrupted", error="Execution workspace is no longer available")
+            if self.journal.current(turn.id, turn.generation):
+                self._finish(turn.id, "interrupted", error="Execution workspace is no longer available")
         except asyncio.CancelledError:
-            self._finish(turn.id, "interrupted", error="Turn was cancelled")
+            if self.journal.current(turn.id, turn.generation):
+                self._finish(turn.id, "recoverable" if scheduled else "interrupted", error="Server stopped")
             raise
         except Exception:
             logger.exception("Runtime failed for turn %s", turn.id)
-            self._finish(turn.id, "failed", error="Unexpected runtime error")
+            if self.journal.current(turn.id, turn.generation):
+                self._finish(turn.id, "failed", error="Unexpected runtime error")
         finally:
-            self.active.pop(role, None)
+            if self.active.get(role) is turn:
+                self.active.pop(role)
 
-    async def _apply_tool(self, role: str, turn: ActiveTurn, call: dict, history: list[dict], workspace_id, *, waiting):
+    async def _apply_tool(self, role, turn, step, position, call, workspace_id, *, scheduled, waiting):
+        self._check_generation(turn)
         name = call["function"]["name"]
         call_id = call["id"]
-        if waiting:
-            result = {"ok": False, "error": "Work is waiting for a human answer."}
-            outcome = "tool.skipped"
-        elif turn.pending or self.closing:
-            result = {"ok": False, "error": "Input changed. Decide again before using this tool."}
-            outcome = "tool.skipped"
-        else:
-            with self.db:
-                self._event(turn.id, "tool.started", name=name, tool_call_id=call_id)
-            arguments = call["function"]["arguments"]
-            if workspace_id is not None and self.collaboration is not None and self.collaboration.handles(name):
-                result = self.collaboration.execute_tool(role, name, arguments)
-                if name == "ask_human" and result["ok"]:
-                    question_id = result["result"]["question"]["question_id"]
-                    waiting = self.collaboration.question_waiting(question_id)
-            elif workspace_id is not None:
-                result = await self.workspace_tools.execute(role, name, arguments)
-            else:
-                result = await asyncio.to_thread(self._dispatch, role, name, arguments)
-            outcome = "tool.completed"
-        history.append({
-            "role": "tool",
-            "tool_call_id": call_id,
-            "content": json.dumps(result, ensure_ascii=False),
-        })
+        arguments = call["function"]["arguments"]
+        receipt = self.journal.receipt(turn.id, step, position)
+        if receipt and receipt["state"] == "completed":
+            result = receipt["result"]
+            return result, waiting or self._question_pauses(name, result, scheduled)
+        if receipt and name not in REPLAYABLE_TOOLS:
+            raise UnknownToolOutcome(f"Check the outcome of {name} ({call_id}) before retrying this work")
+
+        pending = self.journal.checkpoint(turn.id)["pending"]
+        skip_reason = ("Work is waiting for a human answer." if waiting else
+                       "Input changed. Decide again before using this tool." if pending and receipt is None else None)
+        if workspace_id is not None:
+            self.workspace_tools.actor(role)
         with self.db:
-            self._event(turn.id, outcome, name=name, tool_call_id=call_id, result=result)
-        return waiting
+            if not self.journal.start_tool(turn.id, turn.generation, step, position, call_id, name, arguments):
+                raise StaleTurn
+            if skip_reason is None:
+                self._event(turn.id, "tool.started", name=name, tool_call_id=call_id, generation=turn.generation)
+            else:
+                result = {"ok": False, "error": skip_reason}
+                self._complete_tool(turn, step, position, name, call_id, result, "tool.skipped")
+                return result, waiting
+        try:
+            result = await self._execute_tool(role, turn, name, arguments, workspace_id, scheduled)
+        except (WorkspaceNotFound, asyncio.CancelledError):
+            raise
+        except Exception as exc:
+            if name not in REPLAYABLE_TOOLS:
+                raise UnknownToolOutcome(f"Check the outcome of {name} ({call_id}) before retrying this work") from exc
+            raise
+        with self.db:
+            self._complete_tool(turn, step, position, name, call_id, result, "tool.completed")
+        return result, self._question_pauses(name, result, scheduled)
+
+    def _complete_tool(self, turn, step, position, name, call_id, result, outcome):
+        if not self.journal.complete_tool(turn.id, turn.generation, step, position, result):
+            raise StaleTurn
+        self._event(turn.id, outcome, name=name, tool_call_id=call_id, generation=turn.generation, result=result)
+
+    def _question_pauses(self, name, result, scheduled):
+        if name == "ask_human" and result["ok"]:
+            return scheduled or self.collaboration.question_waiting(result["result"]["question"]["question_id"])
+        return False
+
+    async def _execute_tool(self, role, turn, name, arguments, workspace_id, scheduled):
+        if workspace_id is not None and self.collaboration is not None and self.collaboration.handles(name):
+            work = None
+            if scheduled and name == "ask_human":
+                work = self.db.execute("""
+                    SELECT d.message_id FROM scheduled_turns s JOIN message_deliveries d
+                        USING (event_id, session_id, purpose) WHERE s.turn_id = ?
+                """, (turn.id,)).fetchone()["message_id"]
+            return self.collaboration.execute_tool(role, name, arguments, work_message_id=work)
+        if workspace_id is not None:
+            return await self.workspace_tools.execute(role, name, arguments)
+        return await asyncio.to_thread(self._dispatch, role, name, arguments)
 
     def _dispatch(self, role: str, name: str, raw_arguments: str) -> dict:
         try:
@@ -276,5 +410,7 @@ class Runtime:
     async def close(self):
         self.closing = True
         tasks = [turn.task for turn in self.active.values() if turn.task is not None]
+        for task in tasks:
+            task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         self.db.close()

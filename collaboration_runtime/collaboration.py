@@ -233,7 +233,7 @@ class CollaborationService:
                 raise CollaborationForbidden("The user cannot read this private work message")
             work = self.db.execute("""
                 SELECT event_id, purpose FROM message_deliveries
-                WHERE message_id = ? AND session_id = ? AND status IN ('pending', 'blocked')
+                WHERE message_id = ? AND session_id = ? AND status IN ('pending', 'running', 'blocked')
             """, (source["id"], actor.session_id)).fetchone()
             if work is None:
                 raise CollaborationInvalid("The clarification must reference work delivered to this session")
@@ -371,19 +371,36 @@ class CollaborationService:
             ORDER BY d.event_id
         """, {"team": team_id, "session": actor.session_id, "actor": actor.id})]
         for delivery in deliveries:
-            if delivery["purpose"] != "clarification.resume":
-                continue
-            answers = self.db.execute("""
-                SELECT q.source_message_id, q.answer_message_id
-                FROM human_questions q JOIN human_questions last
-                    ON q.work_event_id = last.work_event_id AND q.session_id = last.session_id
-                    AND q.work_purpose = last.work_purpose
-                JOIN team_messages m ON m.id = q.answer_message_id
-                WHERE last.answer_message_id = ? ORDER BY m.seq
-            """, (delivery["message_id"],)).fetchall()
-            delivery["source_message_id"] = answers[0]["source_message_id"]
-            delivery["answer_message_ids"] = [row["answer_message_id"] for row in answers]
+            self._add_delivery_answers(delivery)
         return deliveries
+
+    def _add_delivery_answers(self, delivery):
+        if delivery["purpose"] != "clarification.resume":
+            return
+        answers = self.db.execute("""
+            SELECT q.source_message_id, q.answer_message_id
+            FROM human_questions q JOIN human_questions last
+                ON q.work_event_id = last.work_event_id AND q.session_id = last.session_id
+                AND q.work_purpose = last.work_purpose
+            JOIN team_messages m ON m.id = q.answer_message_id
+            WHERE last.answer_message_id = ? AND last.session_id = ? ORDER BY m.seq
+        """, (delivery["message_id"], delivery["session_id"])).fetchall()
+        if not answers:
+            raise CollaborationInvalid("The continuation has no recorded clarification answer")
+        delivery["source_message_id"] = answers[0]["source_message_id"]
+        delivery["answer_message_ids"] = [row["answer_message_id"] for row in answers]
+
+    def execution_input(self, delivery, actor):
+        if delivery["session_id"] != actor.session_id:
+            raise CollaborationForbidden("Work belongs to another session")
+        message = self.get_message(actor.team_id, actor, delivery["message_id"])
+        self._add_delivery_answers(delivery)
+        payload = {"delivery": delivery, "message": message}
+        if delivery["purpose"] == "clarification.resume":
+            payload["source_message"] = self.get_message(actor.team_id, actor, delivery["source_message_id"])
+            payload["answers"] = [self.get_message(actor.team_id, actor, answer_id)
+                                  for answer_id in delivery["answer_message_ids"]]
+        return payload
 
     def register_goal(self, team_id, actor, body: GoalInput):
         key = (team_id, actor.id, "register_goal", body.request_id)
@@ -514,7 +531,7 @@ class CollaborationService:
             "name": name, "description": description, "parameters": schema.model_json_schema(),
         }} for name, (schema, description) in TOOLS.items()]
 
-    def execute_tool(self, session_id, name, raw_arguments):
+    def execute_tool(self, session_id, name, raw_arguments, *, work_message_id=None):
         actor = self.auth.member(session_id)
         if actor is None:
             return {"ok": False, "error": "Collaboration tools require a formal member session"}
@@ -527,6 +544,8 @@ class CollaborationService:
             elif name == "get_message":
                 result = self.get_message(actor.team_id, actor, args.message_id)
             elif name == "ask_human":
+                if work_message_id is not None and args.source_message_id != work_message_id:
+                    raise CollaborationInvalid("Reference the active delivery's message ID when asking a question")
                 result = self.ask_human(actor.team_id, actor, args)
             else:
                 result = self.participants(self.team(actor.team_id, actor))

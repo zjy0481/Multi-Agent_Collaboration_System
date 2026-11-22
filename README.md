@@ -68,6 +68,16 @@ $team.members | Select-Object role_id, name, session_id, workspace_id
 
 已获准的检索服务可在启动进程设置 `COURSE_SEARCH_URL` 为 SearXNG 的 `/search` JSON 端点，需要认证时用 `COURSE_SEARCH_API_KEY`。成员调用 `search_web` 得到来源和 `search_id`，可用 `get_search_result` 取回自己的记录。搜索由宿主发起，执行容器的外网继续隔离。真实检索来源的课程联调归 T013。 [SearXNG JSON 接口](https://docs.searxng.org/dev/search_api.html) · [T005 集成证据](docs/t005-validation.md)
 
+## T006 持久调度
+
+投递消息后，后台调度器自动为正式成员领取待办并启动回合。每个会话一次推进一项工作，服务最多同时调度四个会话。容量已满的工作保留在待办接口，成员可通过 `GET /v1/sessions/{session_id}/turns` 查看回合状态。真人引用答复可为对应工作自动启动后续回合。
+
+回合重启时优先续接原待办，模型消息和工具结果按原调用 ID 成组恢复。若动作已开始且缺少回执，需要核对结果的回合标记为 `needs_reconciliation`。默认 `COLLABORATION_MODEL_MODE=course`，课程配置错误会直接显示；在隔离状态目录启动时可显式选择 `mock` 查看调度流程。
+
+复验可运行 `python -m pytest -q tests/test_scheduler.py tests/test_journal.py tests/test_model_config.py`。本机验证版本包括 Python 3.14.5（PSF）、SQLite 3.50.4（公有领域）、FastAPI 0.139.0（MIT）、HTTPX 0.28.1（BSD-3-Clause）和 Uvicorn 0.51.0（BSD-3-Clause）。 [依赖锁定](requirements.txt)
+
+真实 HKGAI 抽查使用课程模型 `t2_hkgai-v3_fp8_1m_e7`。模型在第一步调用 `list_participants`，第二步用真实返回的成员 ID 调用 `send_message` 写入群内进展。两次回执保留原调用 ID，回合状态为 `completed`。该抽查使用临时团队与沙箱替身，Docker 隔离由独立回归验证。
+
 ## 开发与测试双角色
 
 打开本机的 [接口交互页](http://127.0.0.1:8000/docs)，或在另一个 PowerShell 中使用：

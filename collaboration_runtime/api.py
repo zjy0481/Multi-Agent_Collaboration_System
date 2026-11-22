@@ -18,10 +18,11 @@ from typing import Annotated
 from .artifacts import ArtifactError, ArtifactNotFound
 from .collaboration import CollaborationForbidden, CollaborationInvalid, CollaborationService, GoalInput, MessageInput
 from .local_auth import LocalAuth, Principal, SESSION_COOKIE, operator_credential
-from .model import CourseModel
+from .model import load_model
 from .roles import ROLE_ID_PATTERN, RoleDefinition, RoleFileError
 from .runtime import ROLES, Runtime, TurnConflict
 from .sandbox import DockerSandbox
+from .scheduler import DeliveryScheduler
 from .search import SearchClient
 from .teams import TeamConflict, TeamNotFound, TeamService, TeamUnavailable
 from .workspace import WorkspaceNotFound, WorkspaceService
@@ -108,14 +109,15 @@ def _check_execution_identity(actor: Principal, role: str):
 
 
 def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, bootstrap=None, search=None,
-               operator_token: str | None = None) -> FastAPI:
+               operator_token: str | None = None, schedule: bool = True) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         state = Path(state_dir or os.environ.get("COLLABORATION_STATE_DIR", ".tmp/runtime"))
-        selected_model = model if model is not None else CourseModel.from_env()
+        selected_model = model if model is not None else load_model()
         runtime = None
         teams = None
         selected_search = None
+        scheduler = None
         try:
             state.mkdir(parents=True, exist_ok=True)
             selected_sandbox = sandbox if sandbox is not None else DockerSandbox(
@@ -134,8 +136,13 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             app.state.workspace = workspace
             app.state.auth = auth
             app.state.collaboration = collaboration
+            if schedule:
+                scheduler = asyncio.create_task(DeliveryScheduler(runtime, collaboration, workspace).run())
             yield
         finally:
+            if scheduler is not None:
+                scheduler.cancel()
+                await asyncio.gather(scheduler, return_exceptions=True)
             if teams is not None:
                 await teams.close()
             if runtime is not None:
@@ -317,6 +324,11 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     async def read_turn(role: str, turn_id: str, caller: Identity):
         _check_execution_identity(caller, role)
         return get_turn(role, turn_id)
+
+    @app.get("/v1/sessions/{role}/turns")
+    async def list_turns(role: str, caller: Identity):
+        _check_execution_identity(caller, role)
+        return app.state.runtime.list_turns(role)
 
     @app.get("/v1/sessions/{role}/turns/{turn_id}/events")
     async def read_events(

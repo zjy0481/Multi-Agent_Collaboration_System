@@ -29,7 +29,7 @@ async def bootstrap(roles):
 
 def app(path):
     return create_app(model=Model(), sandbox=Sandbox(), state_dir=path,
-                      bootstrap=bootstrap, operator_token=OPERATOR)
+                      bootstrap=bootstrap, operator_token=OPERATOR, schedule=False)
 
 
 def auth(token):
@@ -253,7 +253,7 @@ def test_formal_model_tools_use_the_execution_identity(tmp_path):
 
     model = ToolModel()
     application = create_app(model=model, sandbox=Sandbox(), state_dir=tmp_path,
-                             bootstrap=bootstrap, operator_token=OPERATOR)
+                             bootstrap=bootstrap, operator_token=OPERATOR, schedule=False)
     with TestClient(application) as client:
         base, lead, others, tokens = setup_team(client)
         outsider = others[0]

@@ -139,7 +139,7 @@ def test_model_question_yields_slot_and_preserves_tool_call_history(tmp_path):
 
     model = AskingModel()
     application = create_app(model=model, sandbox=Sandbox(), state_dir=tmp_path,
-                             bootstrap=bootstrap, operator_token=OPERATOR)
+                             bootstrap=bootstrap, operator_token=OPERATOR, schedule=False)
     with TestClient(application) as client:
         base, lead, _, tokens = setup_team(client)
         client.headers.update(auth(tokens[lead["member_id"]]))

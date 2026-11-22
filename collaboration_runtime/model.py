@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import json
 import math
 import os
 from pathlib import Path
@@ -59,6 +60,8 @@ class CourseModel:
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
             raise ModelError("Course API timeout must be a positive finite number")
         self._model = model.strip()
+        parts = urlsplit(self._url)
+        self.identity = {"mode": "course", "endpoint": urlunsplit((parts.scheme, parts.netloc, "", "", "")), "model": self._model}
         self._client = httpx.AsyncClient(
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout,
@@ -128,3 +131,38 @@ class CourseModel:
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+class MockModel:
+    """Explicit offline substitute; it does not contact a model provider."""
+
+    def __init__(self):
+        self.identity = {"mode": "mock", "endpoint": None, "model": "offline-mock"}
+
+    async def complete(self, messages: list[dict], tools: list[dict]) -> dict:
+        if any(tool["function"]["name"] == "finish_team_setup" for tool in tools):
+            return {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "offline-team-setup", "type": "function", "function": {
+                    "name": "finish_team_setup",
+                    "arguments": json.dumps({"role_id": None, "reason": "Offline mock uses the default Lead"}),
+                },
+            }]}
+        return {"role": "assistant", "content": "离线模拟回复：未调用课程模型。"}
+
+    async def aclose(self) -> None:
+        pass
+
+
+def load_model(env_file: Path | None = None) -> CourseModel | MockModel:
+    """Select an explicitly configured mode; never fall back on errors."""
+    try:
+        values = dotenv_values(PROJECT_ENV if env_file is None else env_file, encoding="utf-8-sig", interpolate=False)
+    except (OSError, UnicodeError):
+        raise ModelError("Could not read the project .env as UTF-8") from None
+    configured = os.environ.get("COLLABORATION_MODEL_MODE", values.get("COLLABORATION_MODEL_MODE"))
+    mode = "course" if configured is None else configured.strip()
+    if mode == "course":
+        return CourseModel.from_env(env_file)
+    if mode == "mock":
+        return MockModel()
+    raise ModelError("COLLABORATION_MODEL_MODE must be course or mock")
