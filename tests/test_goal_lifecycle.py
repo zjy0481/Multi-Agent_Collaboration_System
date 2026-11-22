@@ -42,12 +42,19 @@ def register(client, base, dispatcher_id, tokens, goal_id, owner_id, reviewer_id
     return ok(response)["task_id"]
 
 
-def accept_task(client, base, tokens, goal_id, dispatcher_id, lead, owner, reviewer):
+def accept_task(client, base, tokens, goal_id, dispatcher_id, lead, owner, reviewer, *,
+                readers=None, content=b"first accepted result",
+                submission_evidence="deterministic check output",
+                review_evidence="Observed check output"):
     task_id = register(client, base, dispatcher_id, tokens, goal_id, owner["member_id"], reviewer["member_id"])
     endpoint = f"{base}/tasks/{task_id}"
-    version = publish(client, base, owner, [lead, reviewer], b"first accepted result")
-    submitted = ok(submit(client, endpoint, tokens[owner["member_id"]], submission(version)))
-    ok(review(client, endpoint, tokens[reviewer["member_id"]], submitted["submission_id"], decision()))
+    version = publish(client, base, owner, [lead, reviewer] if readers is None else readers, content)
+    submission_body = submission(version)
+    submission_body["evidence"] = [submission_evidence]
+    submitted = ok(submit(client, endpoint, tokens[owner["member_id"]], submission_body))
+    review_body = decision()
+    review_body["findings"][0]["evidence"] = review_evidence
+    ok(review(client, endpoint, tokens[reviewer["member_id"]], submitted["submission_id"], review_body))
     return task_id, version
 
 
@@ -180,6 +187,74 @@ def test_acceptance_revision_required_results_blockers_freeze_and_operator_read(
         allowed = recovered.get(f"/v1/artifacts/{first_version['artifact_id']}/versions/{first_version['version']}",
                                 headers=auth(OPERATOR))
         assert allowed.status_code == 200 and allowed.content == b"first accepted result"
+
+
+def test_frozen_counts_and_projections_separate_internal_acceptance(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens, goal_id = context(client)
+        lead_id = lead["member_id"]
+        owner, reviewer = others[:2]
+        required, required_version = accept_task(
+            client, base, tokens, goal_id, lead_id, lead, owner, reviewer,
+            content=b"required final result",
+        )
+        private_task, private_version = accept_task(
+            client, base, tokens, goal_id, lead_id, lead, owner, reviewer,
+            readers=[reviewer], content=b"private non-required result",
+            submission_evidence="PRIVATE NON-REQUIRED SUBMISSION",
+            review_evidence="PRIVATE NON-REQUIRED REVIEW",
+        )
+        assert acceptance(client, base, tokens[lead_id], goal_id, 1,
+                          [("required result", required)]).status_code == 201
+
+        closed = terminate(client, base, tokens[lead_id], goal_id, 2, "completed",
+                           final_version_ids=[required_version["version_id"]])
+        assert closed.status_code == 201, closed.text
+        receipt = closed.json()
+        assert receipt["frozen_summary"]["accepted_tasks"] == 2
+
+        lead_frozen = lifecycle(client, base, tokens[lead_id], goal_id)["terminal"]["frozen"]
+        assert set(lead_frozen["accepted_task_ids"]) >= {required, private_task}
+        assert required in lead_frozen["task_acceptance"]
+        assert private_task not in lead_frozen["task_acceptance"]
+        assert private_version["version_id"] not in json.dumps(lead_frozen)
+
+        user_state = lifecycle(client, base, OPERATOR, goal_id)
+        user_frozen = user_state["terminal"]["frozen"]
+        assert user_frozen["raw_counts"]["accepted_tasks"] == 2
+        assert set(user_frozen["accepted_task_ids"]) >= {required, private_task}
+        assert [item["version_id"] for item in user_frozen["final_versions"]] == [
+            required_version["version_id"],
+        ]
+        assert user_frozen.get("task_acceptance", {}) == {}
+        assert all("versions" not in item and "acceptance" not in item
+                   for item in user_frozen["required_deliveries"])
+        assert "assistant_session_ids" not in user_frozen
+        serialized = json.dumps(user_frozen)
+        for private_fact in (
+            private_version["version_id"], "private non-required result",
+            "PRIVATE NON-REQUIRED SUBMISSION", "PRIVATE NON-REQUIRED REVIEW",
+        ):
+            assert private_fact not in serialized
+
+        source_message_id = user_state["goal"]["source_message_id"]
+        assignment_state = client.get(
+            f"{base}/assignments/{source_message_id}/lifecycle", headers=auth(OPERATOR),
+        )
+        assert assignment_state.status_code == 200, assignment_state.text
+        assert assignment_state.json()["terminal"] == user_state["terminal"]
+        final_download = client.get(
+            f"/v1/artifacts/{required_version['artifact_id']}/versions/{required_version['version']}",
+            headers=auth(OPERATOR),
+        )
+        assert final_download.status_code == 200 and final_download.content == b"required final result"
+
+        raw = json.loads(client.portal.call(lambda: client.app.state.runtime.db.execute(
+            "SELECT frozen FROM goal_terminal_facts WHERE goal_id = ?", (goal_id,),
+        ).fetchone()["frozen"]))
+        assert private_task in raw["task_acceptance"]
+        assert private_version["version_id"] in json.dumps(raw["task_acceptance"])
+        assert "PRIVATE NON-REQUIRED REVIEW" in json.dumps(raw["task_acceptance"])
 
 
 def test_registered_terminal_outcomes_permissions_and_concurrent_cancellation(tmp_path):

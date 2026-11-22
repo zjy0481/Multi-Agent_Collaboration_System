@@ -161,6 +161,22 @@ class TaskResults:
         except (ArtifactError, TeamNotFound):
             return None
 
+    def current_acceptance_fact(self, team_id, goal_id, task_id):
+        """Return current acceptance without applying one reader's artifact ACL."""
+        try:
+            task = self.delegation._task(team_id, task_id)
+            if task["goal_id"] != goal_id or self._stale_inputs(task):
+                return None
+            latest = self._latest(task_id, task["revision"])
+            if self._status(task, latest, []) != "accepted":
+                return None
+            for version in latest["versions"]:
+                metadata = self.artifacts.reference(team_id, version["version_id"])
+                self.artifacts.resolve(team_id, metadata["author_session_id"], version["version_id"])
+            return {key: value for key, value in latest.items() if key != "previous_return_id"}
+        except (ArtifactError, TeamNotFound):
+            return None
+
     def _notify(self, task, actor, members, recipients, event_id, kind, text):
         messages = []
         team_id = task["team_id"]

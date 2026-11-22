@@ -105,6 +105,8 @@ $team.members | Select-Object role_id, name, session_id, workspace_id
 
 Lead 用 `POST /v1/teams/{team_id}/goals/{goal_id}/acceptance` 发布目标验收约定的新修订，列明必需交付及对应任务；`GET /v1/teams/{team_id}/goals/{goal_id}` 同时返回当前约定、排队前置条件、截止时间和终态事实。成功结案要求当前验收中的每项必需交付都有当前有效审查、没有未答问题，并提交覆盖这些交付的可读最终版本。用户可用 `POST .../terminate` 写入 `cancelled`；Lead 可提交带证据的 `failed` 或成功 `completed`。
 
+终态冻结载荷在库内保留完整任务验收事实供 T010 重算；HTTP 与 `get_goal` 读取按读者既有的消息、任务及产物权限投影，只保留合法计数、必需交付摘要和有权限读取的证据及最终交付，不向无权限读者披露非最终版本、审查正文或助手会话关联。
+
 活动目标结束后，同一事务冻结任务与验收证据、关闭该目标范围内的未来投递、可恢复/运行中普通回合、助手工作、未答问题及未登记草案，并给 Lead 写入终态通知。回复目标原始布置的 `supplement` 及其答复线程属于该目标；其他目标的队列项和独立会话不被关闭。Lead 用 `POST .../activate` 激活队列中最早满足前置条件的一项。登记前终止使用 `/v1/teams/{team_id}/assignments/{message_id}/terminate`，之后登记同一原始布置返回 `409`。
 
 一次性启动进程时设置独立的 `COLLABORATION_HOST_TOKEN`，宿主可用 Bearer 凭据调用 `POST /v1/host/teams/{team_id}/goals/{goal_id}/terminal-events`，以稳定 `event_key` 幂等写入 `failed` 或 `timed_out` 事实；该凭据不能是 operator 或成员凭据。设置 `COLLABORATION_GOAL_TIMEOUT_SECONDS` 可让宿主在登记时持久化固定策略截止时间，调度器到期后写入带策略来源和复核时间的 `timed_out` 事实。模型单次错误不会自动变成目标失败。
