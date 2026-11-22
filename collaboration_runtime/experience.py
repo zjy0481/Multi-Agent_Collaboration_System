@@ -2,9 +2,10 @@
 
 This module is deliberately self-contained.  It reads team membership, goals,
 artifact ACLs and assistant forks through the existing services, but owns its
-queries, receipts, HTTP router and model-tool adapter.  A production assembly
-must set ``app.state.experience`` and register this router and adapter at the
-documented integration points.
+queries, receipts, HTTP router factory and model-tool adapter.  A production
+assembly must set ``app.state.experience`` and call :func:`build_router` with
+the application's existing authentication dependency at the documented
+integration point.
 """
 from __future__ import annotations
 
@@ -15,7 +16,6 @@ from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import Field, ValidationError, model_validator
 
 from .artifacts import ArtifactError, ArtifactNotFound
@@ -28,14 +28,13 @@ from .collaboration import (
     Text,
     _now,
 )
-from .local_auth import Principal, SESSION_COOKIE
+from .local_auth import Principal
 from .teams import TeamConflict, TeamNotFound
 from .workspace import WorkspaceNotFound
 
 
 SourceList = Annotated[list["LessonSource"], Field(min_length=1, max_length=32)]
 EvidenceText = Annotated[list[Text], Field(min_length=1, max_length=32)]
-IdList = Annotated[list[ObjectId], Field(min_length=1, max_length=100)]
 OptionalSources = Annotated[list["LessonSource"], Field(max_length=32)]
 
 
@@ -44,17 +43,6 @@ class LessonSource(Command):
 
     kind: Literal["message", "artifact"]
     source_id: ObjectId
-
-    @model_validator(mode="before")
-    @classmethod
-    def aliases(cls, value):
-        if isinstance(value, dict):
-            value = dict(value)
-            if "id" in value and "source_id" not in value:
-                value["source_id"] = value.pop("id")
-            if "type" in value and "kind" not in value:
-                value["kind"] = value.pop("type")
-        return value
 
 
 class RecordLessonInput(Command):
@@ -66,18 +54,6 @@ class RecordLessonInput(Command):
     applies_when: Text
     invalid_when: Text
 
-    @model_validator(mode="before")
-    @classmethod
-    def aliases(cls, value):
-        if isinstance(value, dict):
-            value = dict(value)
-            for name in ("body", "content", "lesson"):
-                if name in value and "text" not in value:
-                    value["text"] = value.pop(name)
-            if "evidence" in value and "sources" not in value:
-                value["sources"] = value.pop("evidence")
-        return value
-
 
 class RetrieveLessonsInput(Command):
     request_id: RequestId
@@ -85,23 +61,12 @@ class RetrieveLessonsInput(Command):
     query: Annotated[str, Field(max_length=400)] = ""
     limit: Annotated[int, Field(ge=1, le=50)] = 20
 
-    @model_validator(mode="before")
-    @classmethod
-    def aliases(cls, value):
-        if isinstance(value, dict):
-            value = dict(value)
-            if "goal_id" in value and "target_goal_id" not in value:
-                value["target_goal_id"] = value.pop("goal_id")
-            if "q" in value and "query" not in value:
-                value["query"] = value.pop("q")
-        return value
-
 
 class HandoffLessonsInput(Command):
     request_id: RequestId
     source_goal_id: ObjectId
     target_goal_id: ObjectId
-    lesson_ids: IdList
+    lesson_ids: Annotated[list[ObjectId], Field(max_length=100)] = Field(default_factory=list)
     purpose: Text
     recipient_session_id: ObjectId | None = None
     recipient_id: ObjectId | None = None
@@ -111,22 +76,9 @@ class HandoffLessonsInput(Command):
     def exactly_one_recipient(self):
         if (self.recipient_session_id is None) == (self.recipient_id is None):
             raise ValueError("Specify exactly one recipient_session_id or recipient_id")
+        if not self.lesson_ids and not self.artifact_version_ids:
+            raise ValueError("A handoff requires at least one lesson or artifact version")
         return self
-
-    @model_validator(mode="before")
-    @classmethod
-    def aliases(cls, value):
-        if isinstance(value, dict):
-            value = dict(value)
-            if "goal_id" in value and "target_goal_id" not in value:
-                value["target_goal_id"] = value.pop("goal_id")
-            if "lesson_id" in value and "lesson_ids" not in value:
-                value["lesson_ids"] = [value.pop("lesson_id")]
-            if "version_ids" in value and "artifact_version_ids" not in value:
-                value["artifact_version_ids"] = value.pop("version_ids")
-            if "recipient_member_id" in value and "recipient_id" not in value:
-                value["recipient_id"] = value.pop("recipient_member_id")
-        return value
 
 
 class RecordLessonUseInput(Command):
@@ -135,7 +87,6 @@ class RecordLessonUseInput(Command):
     action: Text
     evidence: EvidenceText
     sources: OptionalSources = Field(default_factory=list)
-    target_goal_id: ObjectId | None = None
 
 
 class ObserveLessonInput(Command):
@@ -146,21 +97,6 @@ class ObserveLessonInput(Command):
     sources: OptionalSources = Field(default_factory=list)
     recheck_items: Annotated[list[Text], Field(max_length=32)] = Field(default_factory=list)
 
-    @model_validator(mode="before")
-    @classmethod
-    def aliases(cls, value):
-        if isinstance(value, dict):
-            value = dict(value)
-            aliases = {
-                "changed": "behavior_changed",
-                "behaviour_changed": "behavior_changed",
-                "unchanged": "no_change",
-                "expired": "invalidated",
-            }
-            if value.get("outcome") in aliases:
-                value["outcome"] = aliases[value["outcome"]]
-        return value
-
 
 class ReadLessonTool(Command):
     lesson_id: ObjectId
@@ -169,6 +105,10 @@ class ReadLessonTool(Command):
 
 class ExperienceGoalTool(Command):
     target_goal_id: ObjectId
+
+
+class ReadHandoffTool(Command):
+    handoff_id: ObjectId
 
 
 @dataclass(frozen=True)
@@ -345,6 +285,12 @@ class ExperienceService:
             self.collaboration._message_for(team_id, self._require_member(caller), row["source_message_id"])
         return dict(row)
 
+    def _require_active_adoption(self, team_id, goal_id, caller):
+        goal = self._goal(team_id, goal_id, caller)
+        if goal["status"] != "active":
+            raise TeamConflict("Lesson adoption requires an active goal")
+        return goal
+
     def _check_source(self, caller: Caller, source: dict):
         try:
             kind, source_id = source["kind"], source["source_id"]
@@ -397,20 +343,88 @@ class ExperienceService:
             raise TeamNotFound("Lesson not found")
         return row
 
+    def _handoff_row(self, team_id, handoff_id):
+        row = self.db.execute(
+            "SELECT * FROM experience_handoffs WHERE team_id = ? AND id = ?", (team_id, handoff_id),
+        ).fetchone()
+        if row is None:
+            raise TeamNotFound("Lesson handoff not found")
+        return row
+
+    @staticmethod
+    def _handoff_ids(handoff):
+        try:
+            lessons = json.loads(handoff["lesson_ids"])
+            versions = json.loads(handoff["artifact_version_ids"])
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ArtifactError("Invalid lesson handoff metadata") from exc
+        if (
+            not isinstance(lessons, list)
+            or not all(isinstance(item, str) for item in lessons)
+            or not isinstance(versions, list)
+            or not all(isinstance(item, str) for item in versions)
+        ):
+            raise ArtifactError("Invalid lesson handoff metadata")
+        return lessons, versions
+
+    def _owned_lesson(self, team_id, lesson_id, caller, source_goal_id):
+        lesson = self._lesson_row(team_id, lesson_id)
+        if lesson["owner_id"] != caller.member_id:
+            raise TeamNotFound("Lesson not found")
+        if lesson["goal_id"] != source_goal_id:
+            raise CollaborationInvalid("A handoff must cite lessons from its source goal")
+        return lesson
+
     def _check_handoff(self, caller: Caller, handoff, lesson_row, target_goal_id):
         if handoff["target_goal_id"] != target_goal_id or handoff["recipient_session_id"] != caller.session_id:
             raise TeamNotFound("Lesson not found")
-        try:
-            lesson_ids = set(json.loads(handoff["lesson_ids"]))
-            versions = json.loads(handoff["artifact_version_ids"])
-        except (TypeError, ValueError) as exc:
-            raise ArtifactError("Invalid lesson handoff metadata") from exc
+        lesson_ids, versions = self._handoff_ids(handoff)
         if lesson_row["id"] not in lesson_ids:
             raise TeamNotFound("Lesson not found")
         for source in self._sources(lesson_row):
             self._check_source(caller, source)
         for version_id in versions:
             self._check_version(caller, version_id)
+
+    def _handoff_view(self, caller, handoff):
+        if caller.session_id not in {
+            handoff["sender_session_id"], handoff["recipient_session_id"],
+        }:
+            raise TeamNotFound("Lesson handoff not found")
+        try:
+            self._goal(handoff["team_id"], handoff["target_goal_id"], caller)
+            lesson_ids, versions = self._handoff_ids(handoff)
+            for version_id in versions:
+                self._check_version(caller, version_id)
+            lessons = []
+            for lesson_id in lesson_ids:
+                lesson = self._lesson_row(handoff["team_id"], lesson_id)
+                if caller.session_id == handoff["recipient_session_id"]:
+                    self._check_handoff(caller, handoff, lesson, handoff["target_goal_id"])
+                else:
+                    if lesson["owner_id"] != handoff["sender_id"]:
+                        raise TeamNotFound("Lesson not found")
+                    for source in self._sources(lesson):
+                        self._check_source(caller, source)
+                lessons.append(self._lesson_view(caller, lesson, handoff))
+        except (TeamNotFound, ArtifactNotFound):
+            raise TeamNotFound("Lesson handoff not found") from None
+        return {
+            "handoff_id": handoff["id"],
+            "source_goal_id": handoff["source_goal_id"],
+            "target_goal_id": handoff["target_goal_id"],
+            "sender_id": handoff["sender_id"],
+            "recipient_session_id": handoff["recipient_session_id"],
+            "recipient_id": handoff["recipient_id"],
+            "lesson_ids": lesson_ids,
+            "artifact_version_ids": versions,
+            "artifact_versions": [
+                self._version_metadata(handoff["team_id"], version_id) for version_id in versions
+            ],
+            "lessons": lessons,
+            "purpose": handoff["purpose"],
+            "created_at": handoff["created_at"],
+        }
 
     def _version_metadata(self, team_id, version_id):
         row = self.artifacts.reference(team_id, version_id)
@@ -439,7 +453,7 @@ class ExperienceService:
         if handoff is None:
             result["access"] = "owner"
             return result
-        versions = json.loads(handoff["artifact_version_ids"])
+        _, versions = self._handoff_ids(handoff)
         result.update(
             access="handoff",
             handoff={
@@ -580,25 +594,28 @@ class ExperienceService:
             self.db.execute("BEGIN IMMEDIATE")
             caller = self._caller(team_id, caller_session_id)
             self._require_member(caller)
-            digest, replay = self._replay(team_id, caller.key, "handoff_lessons", body)
-            if replay is not None:
-                return replay
-            lessons = [self._lesson_row(team_id, lesson_id) for lesson_id in sorted(set(body.lesson_ids))]
-            versions = sorted(set(body.artifact_version_ids))
-            recipient = self._recipient(team_id, body)
             self._goal(team_id, body.source_goal_id, caller)
             self._goal(team_id, body.target_goal_id, caller)
-            self._goal(team_id, body.target_goal_id, recipient["caller"])
+            digest, replay = self._replay(team_id, caller.key, "handoff_lessons", body)
+            if replay is not None:
+                self._handoff_view(caller, self._handoff_row(team_id, replay["handoff_id"]))
+                return replay
+            lessons = [
+                self._owned_lesson(team_id, lesson_id, caller, body.source_goal_id)
+                for lesson_id in sorted(set(body.lesson_ids))
+            ]
             for lesson in lessons:
-                if lesson["owner_id"] != caller.member_id:
-                    raise TeamNotFound("Lesson not found")
-                if lesson["goal_id"] != body.source_goal_id:
-                    raise CollaborationInvalid("A handoff must cite lessons from its source goal")
                 for source in self._sources(lesson):
                     self._check_source(caller, source)
-                    self._check_source(recipient["caller"], source)
+            versions = sorted(set(body.artifact_version_ids))
             for version_id in versions:
                 self._check_version(caller, version_id)
+            recipient = self._recipient(team_id, body)
+            self._goal(team_id, body.target_goal_id, recipient["caller"])
+            for lesson in lessons:
+                for source in self._sources(lesson):
+                    self._check_source(recipient["caller"], source)
+            for version_id in versions:
                 self._check_version(recipient["caller"], version_id)
             handoff_id = uuid4().hex
             record = {
@@ -655,11 +672,14 @@ class ExperienceService:
             }
         if self.forks is None or not self.forks.exists(session_id):
             raise TeamNotFound("Recipient not found")
-        fork = self.forks.require_active(session_id)
+        try:
+            fork = self.forks.require_active(session_id)
+        except (TeamConflict, TeamNotFound):
+            raise TeamNotFound("Recipient not found") from None
         if fork["team_id"] != team_id or fork["goal_id"] != body.target_goal_id:
-            raise CollaborationForbidden("Assistant is outside the target goal")
+            raise TeamNotFound("Recipient not found")
         if not set(self.assistant_read_tools).intersection(fork["allowed_tools"]):
-            raise CollaborationForbidden("The assistant fork does not allow lesson retrieval")
+            raise TeamNotFound("Recipient not found")
         actor = self.workspace.actor(session_id)
         return {
             "session_id": session_id, "recipient_id": None,
@@ -742,6 +762,10 @@ class ExperienceService:
         caller = self._caller(team_id, caller_session_id)
         return self._project_retrieval(team_id, caller, retrieval_id)
 
+    def get_handoff(self, team_id, caller_session_id, handoff_id):
+        caller = self._caller(team_id, caller_session_id)
+        return self._handoff_view(caller, self._handoff_row(team_id, handoff_id))
+
     def record_lesson_use(self, team_id, caller_session_id, retrieval_id, body: RecordLessonUseInput):
         if not isinstance(body, RecordLessonUseInput):
             body = RecordLessonUseInput.model_validate(body)
@@ -773,8 +797,7 @@ class ExperienceService:
                 raise TeamNotFound("Lesson retrieval not found")
             if body.lesson_id not in json.loads(retrieval["matched_lesson_ids"]):
                 raise CollaborationInvalid("The selected lesson was not returned by this retrieval")
-            if body.target_goal_id is not None and body.target_goal_id != retrieval["target_goal_id"]:
-                raise CollaborationInvalid("A lesson use must stay in its retrieval goal")
+            self._require_active_adoption(team_id, retrieval["target_goal_id"], caller)
             candidates = {
                 lesson["id"]: (lesson, handoff)
                 for lesson, handoff in self._candidates(caller, retrieval["target_goal_id"])
@@ -835,6 +858,7 @@ class ExperienceService:
             """, (team_id, use_id, caller.session_id)).fetchone()
             if use is None:
                 raise TeamNotFound("Lesson use not found")
+            self._require_active_adoption(team_id, use["target_goal_id"], caller)
             candidates = {
                 lesson["id"]: (lesson, handoff)
                 for lesson, handoff in self._candidates(caller, use["target_goal_id"])
@@ -938,18 +962,10 @@ class ExperienceService:
               AND (sender_session_id = ? OR recipient_session_id = ?)
             ORDER BY rowid
         """, (team_id, target_goal_id, caller.session_id, caller.session_id)):
-            handoffs.append({
-                "handoff_id": row["id"],
-                "source_goal_id": row["source_goal_id"],
-                "target_goal_id": row["target_goal_id"],
-                "sender_id": row["sender_id"],
-                "recipient_session_id": row["recipient_session_id"],
-                "recipient_id": row["recipient_id"],
-                "lesson_ids": json.loads(row["lesson_ids"]),
-                "artifact_version_ids": json.loads(row["artifact_version_ids"]),
-                "purpose": row["purpose"],
-                "created_at": row["created_at"],
-            })
+            try:
+                handoffs.append(self._handoff_view(caller, row))
+            except (TeamNotFound, ArtifactNotFound):
+                continue
         return {
             "target_goal_id": target_goal_id,
             "lessons": [self._lesson_view(caller, lesson, handoff) for lesson, handoff in candidates],
@@ -986,13 +1002,14 @@ class ExperienceTools:
         "retrieve_lessons": (RetrieveLessonsInput, "Retrieve only lessons owned by you or explicitly handed "
                                                   "off to this execution identity and target goal."),
         "read_lesson": (ReadLessonTool, "Read one lesson by ID when it is owned by you or explicitly handed off."),
+        "read_handoff": (ReadHandoffTool, "Read one handoff addressed to you or sent by you, including only "
+                                         "artifact versions that remain readable."),
     }
     MEMBER_TOOLS = {
+        **READ_TOOLS,
         "record_lesson": (RecordLessonInput, "Record a personal lesson with evidence references, applicability "
                                             "and invalidation conditions."),
-        "retrieve_lessons": READ_TOOLS["retrieve_lessons"],
-        "read_lesson": READ_TOOLS["read_lesson"],
-        "handoff_lessons": (HandoffLessonsInput, "Hand off owned lessons and authorized artifact versions to "
+        "handoff_lessons": (HandoffLessonsInput, "Hand off owned lessons and/or authorized artifact versions to "
                                                 "one member or assistant for a target goal."),
         "record_lesson_use": (RecordLessonUseTool, "Record a concrete action after a retrieval. This is distinct "
                                                   "from the retrieval and from the observation."),
@@ -1065,6 +1082,11 @@ class ExperienceTools:
                 result = self.service.get_lesson(
                     actor.team_id, session_id, body.lesson_id, body.target_goal_id,
                 )
+            elif name == "read_handoff":
+                body = ReadHandoffTool.model_validate(arguments)
+                result = self.service.get_handoff(
+                    actor.team_id, session_id, body.handoff_id,
+                )
             elif name == "get_experience":
                 body = ExperienceGoalTool.model_validate(arguments)
                 result = self.service.experience_snapshot(
@@ -1106,34 +1128,6 @@ class ExperienceTools:
             return {"ok": False, "error": str(exc), "status": 422}
 
 
-router = APIRouter()
-_bearer = HTTPBearer(auto_error=False)
-
-
-async def _credential(
-    request: Request,
-    bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(_bearer)],
-):
-    if "authorization" in request.headers:
-        return bearer.credentials if bearer else None
-    return request.cookies.get(SESSION_COOKIE)
-
-
-async def _actor(request: Request, token: Annotated[str | None, Depends(_credential)]) -> Principal:
-    actor = request.app.state.auth.resolve(token)
-    if actor is None:
-        raise HTTPException(
-            status_code=401, detail="A valid local credential is required",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    if actor.session_id is None or actor.is_operator:
-        raise HTTPException(status_code=403, detail="This action requires a team member")
-    return actor
-
-
-Identity = Annotated[Principal, Depends(_actor)]
-
-
 def _service(request: Request) -> ExperienceService:
     service = getattr(request.app.state, "experience", None)
     if service is None:
@@ -1157,75 +1151,105 @@ def _error(exc):
     return exc
 
 
-@router.post("/v1/teams/{team_id}/lessons", status_code=201)
-async def record_lesson(team_id: str, body: RecordLessonInput, request: Request, actor: Identity):
-    try:
-        return _service(request).record_lesson(team_id, actor.session_id, body)
-    except Exception as exc:
-        raise _error(exc) from exc
+def build_router(authenticated):
+    """Build the T012 router on top of the application's existing auth boundary."""
+    api_router = APIRouter()
 
+    async def member_actor(actor: Principal = Depends(authenticated)) -> Principal:
+        if actor.is_operator or actor.session_id is None:
+            raise HTTPException(status_code=403, detail="This action requires a team member")
+        return actor
 
-@router.post("/v1/teams/{team_id}/lessons/search", status_code=201)
-async def retrieve_lessons(team_id: str, body: RetrieveLessonsInput, request: Request, actor: Identity):
-    try:
-        return _service(request).retrieve_lessons(team_id, actor.session_id, body)
-    except Exception as exc:
-        raise _error(exc) from exc
+    @api_router.post("/v1/teams/{team_id}/lessons", status_code=201)
+    async def record_lesson(
+        team_id: str, body: RecordLessonInput, request: Request,
+        actor: Principal = Depends(member_actor),
+    ):
+        try:
+            return _service(request).record_lesson(team_id, actor.session_id, body)
+        except Exception as exc:
+            raise _error(exc) from exc
 
+    @api_router.post("/v1/teams/{team_id}/lessons/search", status_code=201)
+    async def retrieve_lessons(
+        team_id: str, body: RetrieveLessonsInput, request: Request,
+        actor: Principal = Depends(member_actor),
+    ):
+        try:
+            return _service(request).retrieve_lessons(team_id, actor.session_id, body)
+        except Exception as exc:
+            raise _error(exc) from exc
 
-@router.get("/v1/teams/{team_id}/lessons/{lesson_id}")
-async def read_lesson(
-    team_id: str, lesson_id: str, request: Request, actor: Identity,
-    target_goal_id: Annotated[str | None, Query()] = None,
-):
-    try:
-        return _service(request).get_lesson(team_id, actor.session_id, lesson_id, target_goal_id)
-    except Exception as exc:
-        raise _error(exc) from exc
+    @api_router.get("/v1/teams/{team_id}/lessons/{lesson_id}")
+    async def read_lesson(
+        team_id: str, lesson_id: str, request: Request,
+        actor: Principal = Depends(member_actor),
+        target_goal_id: Annotated[str | None, Query()] = None,
+    ):
+        try:
+            return _service(request).get_lesson(team_id, actor.session_id, lesson_id, target_goal_id)
+        except Exception as exc:
+            raise _error(exc) from exc
 
+    @api_router.post("/v1/teams/{team_id}/lesson-handoffs", status_code=201)
+    async def handoff_lessons(
+        team_id: str, body: HandoffLessonsInput, request: Request,
+        actor: Principal = Depends(member_actor),
+    ):
+        try:
+            return _service(request).handoff_lessons(team_id, actor.session_id, body)
+        except Exception as exc:
+            raise _error(exc) from exc
 
-@router.post("/v1/teams/{team_id}/lesson-handoffs", status_code=201)
-async def handoff_lessons(team_id: str, body: HandoffLessonsInput, request: Request, actor: Identity):
-    try:
-        return _service(request).handoff_lessons(team_id, actor.session_id, body)
-    except Exception as exc:
-        raise _error(exc) from exc
+    @api_router.get("/v1/teams/{team_id}/lesson-handoffs/{handoff_id}")
+    async def read_handoff(
+        team_id: str, handoff_id: str, request: Request,
+        actor: Principal = Depends(member_actor),
+    ):
+        try:
+            return _service(request).get_handoff(team_id, actor.session_id, handoff_id)
+        except Exception as exc:
+            raise _error(exc) from exc
 
+    @api_router.get("/v1/teams/{team_id}/lesson-retrievals/{retrieval_id}")
+    async def read_retrieval(
+        team_id: str, retrieval_id: str, request: Request,
+        actor: Principal = Depends(member_actor),
+    ):
+        try:
+            return _service(request).get_retrieval(team_id, actor.session_id, retrieval_id)
+        except Exception as exc:
+            raise _error(exc) from exc
 
-@router.get("/v1/teams/{team_id}/lesson-retrievals/{retrieval_id}")
-async def read_retrieval(team_id: str, retrieval_id: str, request: Request, actor: Identity):
-    try:
-        return _service(request).get_retrieval(team_id, actor.session_id, retrieval_id)
-    except Exception as exc:
-        raise _error(exc) from exc
+    @api_router.post("/v1/teams/{team_id}/lesson-retrievals/{retrieval_id}/uses", status_code=201)
+    async def record_lesson_use(
+        team_id: str, retrieval_id: str, body: RecordLessonUseInput, request: Request,
+        actor: Principal = Depends(member_actor),
+    ):
+        try:
+            return _service(request).record_lesson_use(team_id, actor.session_id, retrieval_id, body)
+        except Exception as exc:
+            raise _error(exc) from exc
 
+    @api_router.post("/v1/teams/{team_id}/lesson-uses/{use_id}/observations", status_code=201)
+    async def observe_lesson(
+        team_id: str, use_id: str, body: ObserveLessonInput, request: Request,
+        actor: Principal = Depends(member_actor),
+    ):
+        try:
+            return _service(request).observe_lesson(team_id, actor.session_id, use_id, body)
+        except Exception as exc:
+            raise _error(exc) from exc
 
-@router.post("/v1/teams/{team_id}/lesson-retrievals/{retrieval_id}/uses", status_code=201)
-async def record_lesson_use(
-    team_id: str, retrieval_id: str, body: RecordLessonUseInput, request: Request, actor: Identity,
-):
-    try:
-        return _service(request).record_lesson_use(team_id, actor.session_id, retrieval_id, body)
-    except Exception as exc:
-        raise _error(exc) from exc
+    @api_router.get("/v1/teams/{team_id}/experience")
+    async def read_experience(
+        team_id: str, request: Request,
+        target_goal_id: Annotated[str, Query()],
+        actor: Principal = Depends(member_actor),
+    ):
+        try:
+            return _service(request).experience_snapshot(team_id, actor.session_id, target_goal_id)
+        except Exception as exc:
+            raise _error(exc) from exc
 
-
-@router.post("/v1/teams/{team_id}/lesson-uses/{use_id}/observations", status_code=201)
-async def observe_lesson(
-    team_id: str, use_id: str, body: ObserveLessonInput, request: Request, actor: Identity,
-):
-    try:
-        return _service(request).observe_lesson(team_id, actor.session_id, use_id, body)
-    except Exception as exc:
-        raise _error(exc) from exc
-
-
-@router.get("/v1/teams/{team_id}/experience")
-async def read_experience(
-    team_id: str, request: Request, actor: Identity,
-    target_goal_id: Annotated[str, Query()],
-):
-    try:
-        return _service(request).experience_snapshot(team_id, actor.session_id, target_goal_id)
-    except Exception as exc:
-        raise _error(exc) from exc
+    return api_router
