@@ -22,6 +22,8 @@ from .delegation import (
     ProposalVersionInput,
 )
 from .delegation_tools import DelegationTools
+from .fork_messages import ForkDecisionInput, ForkMessageInput, ForkMessages
+from .forks import ForkHandoffInput, ForkInput, ForkService
 from .task_results import ReviewResultInput, SubmitResultInput
 from .git_approvals import ApprovalInput, GitApprovals
 from .git_executor import GitExecutor
@@ -144,6 +146,12 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             collaboration.delegation_tools = DelegationTools(delegation, auth, workspace)
             runtime.workspace_tools = workspace
             runtime.collaboration = collaboration
+            forks = ForkService(runtime, collaboration, workspace, delegation)
+            runtime.forks = forks
+            runtime.fork_messages = ForkMessages(forks, collaboration, runtime)
+            workspace.assistant_access = forks.authorize_workspace
+            workspace.assistant_readers = forks.material_readers
+            delegation.forks = forks
             app.state.runtime = runtime
             app.state.teams = teams
             app.state.workspace = workspace
@@ -392,6 +400,43 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     async def health():
         return {"status": "ok"}
 
+    @app.post("/v1/sessions/{role}/forks", status_code=201)
+    async def create_fork(role: str, body: ForkInput, actor: Identity):
+        try:
+            return await app.state.runtime.forks.create(actor, role, body)
+        except ArtifactNotFound as exc:
+            raise HTTPException(status_code=404, detail="Fork material not found") from exc
+
+    @app.get("/v1/forks/{assistant_id}/messages")
+    async def read_fork_messages(assistant_id: str, actor: Identity):
+        return app.state.runtime.fork_messages.list_for(assistant_id, actor.session_id)
+
+    @app.post("/v1/forks/{assistant_id}/messages", status_code=201)
+    async def send_fork_message(assistant_id: str, body: ForkMessageInput, actor: Identity):
+        return app.state.runtime.fork_messages.post(assistant_id, actor.session_id, body)
+
+    @app.post("/v1/forks/{assistant_id}/decision", status_code=201)
+    async def decide_fork_result(assistant_id: str, body: ForkDecisionInput, actor: Identity):
+        return app.state.runtime.fork_messages.decide(assistant_id, actor.session_id, body)
+
+    @app.post("/v1/forks/{assistant_id}/revoke")
+    async def revoke_fork(assistant_id: str, actor: Identity):
+        return app.state.runtime.forks.revoke(assistant_id, actor)
+
+    @app.post("/v1/forks/{assistant_id}/handoff", status_code=201)
+    async def handoff_fork_material(assistant_id: str, body: ForkHandoffInput, actor: Identity):
+        try:
+            return app.state.runtime.forks.handoff(assistant_id, actor, body)
+        except ArtifactNotFound as exc:
+            raise HTTPException(status_code=404, detail="Fork material not found") from exc
+
+    def check_turn_reader(role, caller, turn_id):
+        forks = app.state.runtime.forks
+        if not forks.exists(role):
+            _check_execution_identity(caller, role)
+        elif not any(turn["turn_id"] == turn_id for turn in forks.observable_turns(role, caller)):
+            raise HTTPException(status_code=404, detail="Turn not found in this session")
+
     @app.post("/v1/sessions/{role}/turns", status_code=202)
     async def start_turn(role: str, body: TurnInput, caller: Identity):
         _check_execution_identity(caller, role)
@@ -423,13 +468,21 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
 
     @app.get("/v1/sessions/{role}/turns/{turn_id}")
     async def read_turn(role: str, turn_id: str, caller: Identity):
-        _check_execution_identity(caller, role)
-        return get_turn(role, turn_id)
+        check_turn_reader(role, caller, turn_id)
+        turn = get_turn(role, turn_id)
+        if app.state.runtime.forks.exists(role):
+            return {**turn, "reply": None, "error": None}
+        return turn
 
     @app.get("/v1/sessions/{role}/turns")
-    async def list_turns(role: str, caller: Identity):
-        _check_execution_identity(caller, role)
-        return app.state.runtime.list_turns(role)
+    async def list_turns(role: str, caller: Identity, completed_only: bool = False):
+        runtime = app.state.runtime
+        if runtime.forks.exists(role):
+            turns = runtime.forks.observable_turns(role, caller)
+        else:
+            _check_execution_identity(caller, role)
+            turns = runtime.list_turns(role)
+        return [turn for turn in turns if turn["status"] == "completed"] if completed_only else turns
 
     @app.get("/v1/sessions/{role}/turns/{turn_id}/events")
     async def read_events(
@@ -440,9 +493,10 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
         after: Annotated[int, Query(ge=0)] = 0,
         last_event_id: Annotated[int | None, Header(ge=0)] = None,
     ):
-        _check_execution_identity(caller, role)
+        check_turn_reader(role, caller, turn_id)
         get_turn(role, turn_id)
         runtime = app.state.runtime
+        restricted = runtime.forks.exists(role)
 
         async def stream():
             cursor = max(after, last_event_id or 0)
@@ -454,6 +508,10 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
                         return
                 for event in runtime.events(turn_id, cursor):
                     cursor = event["seq"]
+                    if restricted:
+                        if not event["type"].startswith("turn."):
+                            continue
+                        event = {"seq": cursor, "type": event["type"]}
                     yield f"id: {cursor}\nevent: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
                 if runtime.get_turn(role, turn_id)["status"] != "running" and not runtime.events(turn_id, cursor):
                     return
