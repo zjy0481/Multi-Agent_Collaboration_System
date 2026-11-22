@@ -34,7 +34,19 @@ $team = Invoke-RestMethod 'http://127.0.0.1:8000/v1/teams' -Method Post -Content
 $team.members | Select-Object role_id, name, session_id, workspace_id
 ```
 
-准备失败时重复发送同一请求体，宿主复用已经分配的标识。用 `GET /v1/teams/{team_id}` 查看当前成员。用 `POST /v1/teams/{team_id}/members` 提交 `request_id`、`expected_version`、`role_id`、`name` 和 `prompt` 增员，工作区就绪后才发布下一版契约。用 `GET /v1/teams/{team_id}/contracts/{version}` 可核对历史版本。拿到成员的 `session_id` 后，发送 `POST /v1/sessions/{session_id}/turns` 可用原角色提示在专属工作区执行命令。正式团队的消息待办和产物授权分别由 T002 与 T005 接入。
+准备失败时重复发送同一请求体，宿主复用已经分配的标识。用 `GET /v1/teams/{team_id}` 查看当前成员。用 `POST /v1/teams/{team_id}/members` 提交 `request_id`、`expected_version`、`role_id`、`name` 和 `prompt` 增员，工作区就绪后才发布下一版契约。用 `GET /v1/teams/{team_id}/contracts/{version}` 可核对历史版本。拿到成员的 `session_id` 后，发送 `POST /v1/sessions/{session_id}/turns` 可用原角色提示在专属工作区执行命令。正式团队的消息待办由 T002 接入。
+
+## T005 私有工作区与产物交接
+
+对已导入团队的正式成员发起回合。成员可以调用 `create_file`、`read_file`、`update_file`、`delete_file` 操作自己的工作区，并通过 `run_command` 执行代码和测试。工作区文件使用相对路径，发布或文件写入单次上限为 1 MiB。
+
+1. 请开发成员创建并自测一个文件，再调用 `list_workspace_readers` 取得测试成员的 `session_id`，通过 `publish_artifact` 指定该读者。工具返回 `artifact_id`、数字版本和 `version_id`。传回相同 `artifact_id` 可发布下一版。
+2. 请测试成员用 `list_artifacts` 或 `read_artifact` 确认所验版本，在 `run_command` 的 `artifact_version_ids` 传入对应 ID。该命令可从 `/inputs/<version_id>/artifact` 读取指定只读文件。测试脚本仍写进自己的 `/workspace`。
+3. 本机可信操作者也可用 `GET /v1/artifacts/{artifact_id}/versions/{version}` 下载指定数字版本，在 `X-Session-ID` 请求头选定读取视角。指定视角无版本读权时返回 404。会话 ID 只用于本机选视角，部署沿用回环地址和单一可信操作者；多用户登录和身份绑定由 T002 接入。模型工具的会话身份由运行时注入。
+
+宿主在登记助手时指定独立工作区、允许的工具和授权版本。每次取文件和挂载都会检查该范围仍然有效，历史回合分支的入口由 T007 接入。
+
+已获准的检索服务可在启动进程设置 `COURSE_SEARCH_URL` 为 SearXNG 的 `/search` JSON 端点，需要认证时用 `COURSE_SEARCH_API_KEY`。成员调用 `search_web` 得到来源和 `search_id`，可用 `get_search_result` 取回自己的记录。搜索由宿主发起，执行容器的外网继续隔离。真实检索来源的课程联调归 T013。 [SearXNG JSON 接口](https://docs.searxng.org/dev/search_api.html) · [T005 集成证据](docs/t005-validation.md)
 
 ## 开发与测试双角色
 
@@ -63,4 +75,4 @@ $env:RUN_DOCKER_TESTS = '1'
 python -m pytest -q
 ```
 
-普通测试用明确注入的模型与工具替身检查多步工具回合、轮中补充和事件。开启 Docker 测试后会使用真实容器核对角色隔离、产物只读、凭据隔离、默认无外网及超时清理。测试无需课程凭据。
+普通测试用明确注入的模型、工具及检索传输替身检查多步回合、授权、产物版本和检索来源记录。开启 Docker 测试后会使用真实容器核对角色隔离、文件工具、旧版只读复验、凭据隔离、默认无外网及超时清理。测试无需课程凭据。

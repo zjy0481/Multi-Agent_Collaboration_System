@@ -327,8 +327,10 @@ class TeamService:
         return json.loads(row["details"])
 
     def session(self, session_id):
-        member = self.db.execute("SELECT details FROM members WHERE session_id = ?", (session_id,)).fetchone()
-        return json.loads(member["details"]) if member is not None else None
+        member = self.db.execute("SELECT team_id, details FROM members WHERE session_id = ?", (session_id,)).fetchone()
+        if member is None:
+            return None
+        return {**json.loads(member["details"]), "team_id": member["team_id"]}
 
     async def close(self):
         await asyncio.gather(*self.jobs.values(), return_exceptions=True)

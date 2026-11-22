@@ -1,4 +1,4 @@
-"""Persisted role sessions and the model/tool loop for the two-role demo."""
+"""Persisted execution sessions and the model/tool loop."""
 
 import asyncio
 from dataclasses import dataclass, field
@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from .model import ModelError
 from .sandbox import SandboxError
+from .workspace import WorkspaceNotFound
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,7 @@ class Runtime:
         self.max_steps = max_steps
         self.active: dict[str, ActiveTurn] = {}
         self.closing = False
+        self.workspace_tools = None
         self.db = sqlite3.connect(database)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -164,11 +166,11 @@ class Runtime:
         try:
             prior = [{"role": "system", "content": prompt if prompt is not None else ROLES[role]}, *self._history(role)]
             current = [{"role": "user", "content": text}]
-            tools = [WORKSPACE_TOOL] if workspace_id is not None else TOOLS
             for step in range(1, self.max_steps + 1):
                 if self.closing:
                     self._finish(turn.id, "interrupted", error="Server is shutting down")
                     return
+                tools = self.workspace_tools.tools_for(role) if workspace_id is not None else TOOLS
                 with self.db:
                     for new_text in turn.pending:
                         self._event(turn.id, "turn.input_applied", text=new_text)
@@ -176,6 +178,8 @@ class Runtime:
                     self._event(turn.id, "model.started", step=step)
                 turn.pending.clear()
                 assistant = await self.model.complete(prior + current, tools)
+                if workspace_id is not None:
+                    self.workspace_tools.actor(role)
                 calls = assistant.get("tool_calls") or []
                 if len(calls) > 8:
                     raise ModelError("Model returned too many tools in one decision")
@@ -196,6 +200,8 @@ class Runtime:
             self._finish(turn.id, "failed", error="Turn exceeded its model step limit")
         except ModelError as exc:
             self._finish(turn.id, "failed", error=str(exc))
+        except WorkspaceNotFound:
+            self._finish(turn.id, "interrupted", error="Execution workspace is no longer available")
         except asyncio.CancelledError:
             self._finish(turn.id, "interrupted", error="Turn was cancelled")
             raise
@@ -214,9 +220,11 @@ class Runtime:
         else:
             with self.db:
                 self._event(turn.id, "tool.started", name=name, tool_call_id=call_id)
-            result = await asyncio.to_thread(
-                self._dispatch, role, name, call["function"]["arguments"], workspace_id,
-            )
+            arguments = call["function"]["arguments"]
+            if workspace_id is not None:
+                result = await self.workspace_tools.execute(role, name, arguments)
+            else:
+                result = await asyncio.to_thread(self._dispatch, role, name, arguments)
             outcome = "tool.completed"
         history.append({
             "role": "tool",
@@ -226,14 +234,13 @@ class Runtime:
         with self.db:
             self._event(turn.id, outcome, name=name, tool_call_id=call_id, result=result)
 
-    def _dispatch(self, role: str, name: str, raw_arguments: str, workspace_id: str | None = None) -> dict:
+    def _dispatch(self, role: str, name: str, raw_arguments: str) -> dict:
         try:
             arguments = json.loads(raw_arguments)
         except (TypeError, ValueError, RecursionError):
             return {"ok": False, "error": "Tool arguments must be valid JSON"}
         if (
             name not in TOOL_PARAMETERS
-            or (workspace_id is not None and name != "run_command")
             or not isinstance(arguments, dict)
             or set(arguments) != TOOL_PARAMETERS[name]
             or any(not isinstance(value, str) or not value.strip() for value in arguments.values())
@@ -241,7 +248,7 @@ class Runtime:
             return {"ok": False, "error": "Unknown tool or invalid arguments"}
         try:
             if name == "run_command":
-                data = self.sandbox.run(workspace_id or role, arguments["command"])
+                data = self.sandbox.run(role, arguments["command"])
             elif name == "publish_artifact":
                 data = self.sandbox.publish(role, arguments["path"], arguments["recipient"])
             else:

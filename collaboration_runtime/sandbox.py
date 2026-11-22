@@ -43,6 +43,55 @@ finally:
     os.close(directory)
 """
 
+MUTATE_WORKSPACE_FILE = """\
+import os, stat, sys, uuid
+parts = sys.argv[1].split('/')
+action = sys.argv[2]
+writing = action in ('create', 'update')
+data = sys.stdin.buffer.read(1048577) if writing else b''
+if len(data) > 1048576:
+    raise ValueError('file too large')
+if writing and len(data) != int(sys.argv[3]):
+    raise ValueError('incomplete input')
+directory = os.open('/workspace', os.O_RDONLY | os.O_DIRECTORY)
+temp = None
+try:
+    for part in parts[:-1]:
+        if action == 'create':
+            try: os.mkdir(part, dir_fd=directory)
+            except FileExistsError: pass
+        child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+        os.close(directory)
+        directory = child
+    target = parts[-1]
+    if action in ('update', 'delete'):
+        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode): raise ValueError('not a regular file')
+        finally: os.close(fd)
+    if action == 'cleanup':
+        try: os.unlink(sys.argv[3], dir_fd=directory)
+        except FileNotFoundError: pass
+    elif action == 'delete':
+        os.unlink(target, dir_fd=directory)
+    else:
+        temp = sys.argv[4]
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=directory)
+        with os.fdopen(fd, 'wb') as output:
+            output.write(data)
+        if action == 'create':
+            os.link(temp, target, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            os.unlink(temp, dir_fd=directory)
+        else:
+            os.replace(temp, target, src_dir_fd=directory, dst_dir_fd=directory)
+        temp = None
+finally:
+    if temp is not None:
+        try: os.unlink(temp, dir_fd=directory)
+        except FileNotFoundError: pass
+    os.close(directory)
+"""
+
 
 class SandboxError(RuntimeError):
     """The sandbox could not safely perform the requested operation."""
@@ -104,7 +153,8 @@ class DockerSandbox:
         self._role(role)
         return [dict(a) for a in self._artifacts() if a.get("recipient") == role]
 
-    def _base(self, role: str, name: str, readonly_workspace: bool) -> list[str]:
+    def _base(self, role: str, name: str, readonly_workspace: bool,
+              inputs: dict[str, Path] | None = None) -> list[str]:
         workspace = f"type=volume,source={self._volume(role)},target=/workspace"
         if readonly_workspace:
             workspace += ",readonly"
@@ -113,7 +163,20 @@ class DockerSandbox:
                 "--pids-limit", "64", "--memory", "256m", "--cpus", "1", "--read-only",
                 "--tmpfs", "/tmp:rw,noexec,nosuid,size=16m", "--workdir", "/workspace",
                 "--mount", workspace]
-        if not readonly_workspace:
+        if inputs is not None:
+            if not isinstance(inputs, dict):
+                raise SandboxError("inputs must be a mapping")
+            for artifact_id, source in inputs.items():
+                if not isinstance(artifact_id, str) or not self.ID_RE.fullmatch(artifact_id):
+                    raise SandboxError("invalid input version ID")
+                try:
+                    file_path = Path(source).resolve(strict=True)
+                    if not file_path.is_file() or ',' in str(file_path):
+                        raise ValueError
+                except (OSError, TypeError, ValueError):
+                    raise SandboxError("invalid input file") from None
+                args += ["--mount", f"type=bind,source={file_path},target=/inputs/{artifact_id}/artifact,readonly"]
+        elif not readonly_workspace:
             for artifact in self.list_artifacts(role):
                 artifact_id = artifact["id"]
                 directory = (self.state_dir / "artifacts" / artifact_id / "content").resolve()
@@ -125,11 +188,15 @@ class DockerSandbox:
 
     def _execute(
         self, role: str, command: list[str], *, readonly_workspace: bool = False,
-        output_limit: int | None = None,
+        output_limit: int | None = None, inputs: dict[str, Path] | None = None,
+        stdin_data: bytes | None = None,
     ) -> dict:
         self._role(role)
         name = self.prefix + "-run-" + uuid.uuid4().hex
-        args = self._base(role, name, readonly_workspace) + [self.image] + command
+        args = self._base(role, name, readonly_workspace, inputs)
+        if stdin_data is not None:
+            args.append("-i")
+        args += [self.image] + command
         limit = output_limit if output_limit is not None else self.MAX_OUTPUT
         out_buffer, err_buffer = bytearray(), bytearray()
         def drain(stream, buffer, cap):
@@ -142,11 +209,21 @@ class DockerSandbox:
 
         try:
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                       stdin=subprocess.DEVNULL)
+                                       stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL)
             workers = [threading.Thread(target=drain, args=(process.stdout, out_buffer, limit), daemon=True),
                        threading.Thread(target=drain, args=(process.stderr, err_buffer, self.MAX_OUTPUT), daemon=True)]
             for worker in workers:
                 worker.start()
+            if stdin_data is not None:
+                def send_input():
+                    try:
+                        with process.stdin as stream:
+                            stream.write(stdin_data)
+                    except (BrokenPipeError, OSError):
+                        pass
+                writer = threading.Thread(target=send_input, daemon=True)
+                workers.append(writer)
+                writer.start()
             timed_out = False
             cleanup_error = None
             try:
@@ -178,11 +255,54 @@ class DockerSandbox:
             raise SandboxError(f"Docker or command startup failed (exit {process.returncode}): {result['stderr'][:2048]}")
         return result
 
-    def run(self, role: str, command: str) -> dict:
+    def run(self, role: str, command: str, *, inputs: dict[str, Path] | None = None) -> dict:
         self._role(role)
         if not isinstance(command, str) or not command or "\x00" in command:
             raise SandboxError("command must be a nonempty string")
-        return self._execute(role, ["/bin/sh", "-c", command])
+        return self._execute(role, ["/bin/sh", "-c", command], inputs=inputs)
+
+    def read_bytes(self, workspace_id: str, path: str) -> bytes:
+        relative = self._path(path)
+        result = self._execute(workspace_id, ["python3", "-I", "-c", READ_WORKSPACE_FILE,
+                                              relative, str(self.MAX_FILE)],
+                               readonly_workspace=True, inputs={},
+                               output_limit=((self.MAX_FILE + 2) // 3) * 4 + 8)
+        if result["timed_out"] or result["exit_code"] != 0:
+            raise SandboxError("cannot read workspace file")
+        try:
+            data = base64.b64decode(result["stdout"], validate=True)
+        except ValueError:
+            raise SandboxError("invalid file transfer") from None
+        if len(data) > self.MAX_FILE:
+            raise SandboxError("file too large")
+        return data
+
+    def write_bytes(self, workspace_id: str, path: str, content: bytes, *, mode: str) -> None:
+        if not isinstance(content, bytes) or len(content) > self.MAX_FILE:
+            raise SandboxError("content must be bytes at most 1 MiB")
+        if mode not in ("create", "update"):
+            raise SandboxError("mode must be create or update")
+        relative = self._path(path)
+        temp = ".collab-write-" + uuid.uuid4().hex
+        script = ["python3", "-I", "-c", MUTATE_WORKSPACE_FILE, relative]
+        result = self._execute(workspace_id, [*script, mode, str(len(content)), temp],
+                               inputs={}, stdin_data=content)
+        if result["timed_out"]:
+            try:
+                cleanup = self._execute(workspace_id, [*script, "cleanup", temp], inputs={})
+                if cleanup["exit_code"] != 0 or cleanup["timed_out"]:
+                    raise SandboxError("temporary file cleanup not confirmed")
+            except SandboxError:
+                raise SandboxError("workspace write timed out; temporary file cleanup not confirmed") from None
+            raise SandboxError("workspace write timed out")
+        if result["exit_code"] != 0:
+            raise SandboxError("cannot write workspace file")
+
+    def delete_file(self, workspace_id: str, path: str) -> None:
+        result = self._execute(workspace_id, ["python3", "-I", "-c", MUTATE_WORKSPACE_FILE,
+                                              self._path(path), "delete"], inputs={})
+        if result["timed_out"] or result["exit_code"] != 0:
+            raise SandboxError("cannot delete workspace file")
 
     def prepare(self, workspace_id: str) -> None:
         """Mount a workspace and verify the container user can write to it.

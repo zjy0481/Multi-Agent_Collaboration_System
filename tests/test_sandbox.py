@@ -152,7 +152,7 @@ def test_registered_member_sessions_use_independent_docker_workspaces(sandbox, t
     class Model:
         async def complete(self, messages, tools):
             assert messages[0]["content"] == expected_prompt
-            assert [tool["function"]["name"] for tool in tools] == ["run_command"]
+            assert {"run_command", "read_file", "publish_artifact"} <= {tool["function"]["name"] for tool in tools}
             if messages[-1]["role"] == "tool":
                 execution = json.loads(messages[-1]["content"])
                 assert execution["ok"] and execution["result"]["exit_code"] == 0
@@ -208,6 +208,80 @@ def test_registered_member_sessions_use_independent_docker_workspaces(sandbox, t
             workspaces.append(auditor["workspace_id"])
             assert added.json()["contract"]["version"] == 2
             run_ok(sandbox, auditor["workspace_id"], "test -w /workspace && test ! -e owner.txt")
+    finally:
+        if workspaces:
+            sandbox.cleanup(*workspaces)
+
+
+def test_registered_members_file_tools_and_version_handoff(sandbox, tmp_path, monkeypatch):
+    class Model:
+        async def complete(self, _messages, _tools):
+            raise AssertionError("Workspace tests call the registered tool handlers directly")
+
+    async def bootstrap(_roles):
+        return LeadDecision("lead", "Coordinates the software roster")
+
+    monkeypatch.setenv("COURSE_API_KEY", "host-only-t005-canary")
+    sample = Path(__file__).resolve().parents[1] / "test samples" / "scenario_1_software_engineering 2"
+    roster = (sample / "01_role_initialization.md").read_text(encoding="utf-8")
+    workspaces = []
+    try:
+        app = create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap)
+        with TestClient(app) as client:
+            response = client.post("/v1/teams", json={"request_id": "t005-docker", "roster": roster})
+            assert response.status_code == 201, response.text
+            members = {item["role_id"]: item for item in response.json()["members"]}
+            workspaces.extend(item["workspace_id"] for item in members.values())
+            dev, tester, outsider = (members[role]["session_id"] for role in ("dev", "qa", "release"))
+
+            def tool(session_id, name, **arguments):
+                return client.portal.call(app.state.workspace.execute, session_id, name, json.dumps(arguments))
+
+            def ok(session_id, name, **arguments):
+                result = tool(session_id, name, **arguments)
+                assert result["ok"], result
+                return result["result"]
+
+            path = "package/booking.py"
+            old = "def slots():\n    return 1\n"
+            new = "def slots():\n    return 2\n"
+            ok(dev, "create_file", path=path, content=old)
+            ok(dev, "create_file", path="private.txt", content="private")
+            assert ok(dev, "read_file", path=path)["content"] == old
+            assert not tool(dev, "create_file", path=path, content="overwrite")["ok"]
+            assert not tool(dev, "read_file", path="../private.txt")["ok"]
+            version1 = ok(dev, "publish_artifact", path=path, reader_session_ids=[tester])
+            ok(dev, "update_file", path=path, content=new)
+            version2 = ok(dev, "publish_artifact", path=path, reader_session_ids=[tester], artifact_id=version1["artifact_id"])
+            assert (version1["version"], version2["version"]) == (1, 2)
+            assert ok(tester, "read_artifact", version_id=version1["version_id"])["content"] == old
+            assert ok(tester, "read_artifact", version_id=version2["version_id"])["content"] == new
+
+            old_path = version1["path"]
+            result = ok(tester, "run_command", command=(
+                "test ! -e private.txt && python -I -c "
+                f"\"data = {{}}; exec(open('{old_path}').read(), data); assert data['slots']() == 1\""
+            ), artifact_version_ids=[version1["version_id"]])
+            assert result["exit_code"] == 0 and not result["timed_out"], result
+            denied = ok(tester, "run_command", command=f"printf changed > {old_path}", artifact_version_ids=[version1["version_id"]])
+            assert denied["exit_code"] != 0, denied
+            assert not tool(outsider, "read_artifact", version_id=version1["version_id"])["ok"]
+            assert not tool(outsider, "run_command", command="true", artifact_version_ids=[version1["version_id"]])["ok"]
+            assert not tool(outsider, "read_file", path="private.txt")["ok"]
+            assert ok(outsider, "run_command", command='test -z "$COURSE_API_KEY" && test ! -e private.txt')["exit_code"] == 0
+
+            endpoint = f"/v1/artifacts/{version1['artifact_id']}/versions/1"
+            assert client.get(endpoint, headers={"X-Session-ID": tester}).text == old
+            assert client.get(endpoint, headers={"X-Session-ID": outsider}).status_code == 404
+            assert ok(dev, "run_command", command="ln -s package nested-link; ln -s private.txt unsafe.txt")["exit_code"] == 0
+            for unsafe in ("nested-link/booking.py", "unsafe.txt"):
+                assert not tool(dev, "read_file", path=unsafe)["ok"]
+                assert not tool(dev, "update_file", path=unsafe, content="changed")["ok"]
+                assert not tool(dev, "delete_file", path=unsafe)["ok"]
+            ok(dev, "delete_file", path=path)
+            assert not tool(dev, "read_file", path=path)["ok"]
+            assert ok(dev, "read_file", path="private.txt")["content"] == "private"
+            assert client.get(endpoint, headers={"X-Session-ID": tester}).text == old
     finally:
         if workspaces:
             sandbox.cleanup(*workspaces)

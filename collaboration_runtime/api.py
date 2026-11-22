@@ -7,16 +7,19 @@ import os
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, StringConstraints, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from typing import Annotated
 
+from .artifacts import ArtifactError, ArtifactNotFound
 from .model import CourseModel
 from .roles import ROLE_ID_PATTERN, RoleDefinition, RoleFileError
 from .runtime import ROLES, Runtime, TurnConflict
 from .sandbox import DockerSandbox
+from .search import SearchClient
 from .teams import TeamConflict, TeamNotFound, TeamService, TeamUnavailable
+from .workspace import WorkspaceNotFound, WorkspaceService
 
 RequestId = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
 DisplayName = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
@@ -52,13 +55,14 @@ async def _local_operator(request: Request):
         raise HTTPException(status_code=403, detail="This API accepts local operators only")
 
 
-def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, bootstrap=None) -> FastAPI:
+def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, bootstrap=None, search=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         state = Path(state_dir or os.environ.get("COLLABORATION_STATE_DIR", ".tmp/runtime"))
         selected_model = model if model is not None else CourseModel.from_env()
         runtime = None
         teams = None
+        selected_search = None
         try:
             state.mkdir(parents=True, exist_ok=True)
             selected_sandbox = sandbox if sandbox is not None else DockerSandbox(
@@ -66,14 +70,20 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             )
             runtime = Runtime(selected_model, selected_sandbox, state / "runtime.sqlite3")
             teams = TeamService(runtime.db, selected_model, selected_sandbox, bootstrap)
+            selected_search = search if search is not None else SearchClient.from_env()
+            workspace = WorkspaceService(runtime.db, teams, selected_sandbox, state / "team-artifacts", selected_search)
+            runtime.workspace_tools = workspace
             app.state.runtime = runtime
             app.state.teams = teams
+            app.state.workspace = workspace
             yield
         finally:
             if teams is not None:
                 await teams.close()
             if runtime is not None:
                 await runtime.close()
+            if hasattr(selected_search, "aclose"):
+                await selected_search.aclose()
             if hasattr(selected_model, "aclose"):
                 await selected_model.aclose()
 
@@ -114,7 +124,24 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             team_id, body.request_id, body.expected_version, RoleDefinition(body.role_id, body.name, body.prompt),
         )
 
+    @app.get("/v1/artifacts/{artifact_id}/versions/{version}")
+    async def artifact_version(artifact_id: str, version: int, session_id: Annotated[str, Header(alias="X-Session-ID")]):
+        try:
+            record, path = app.state.workspace.resolve_number(session_id, artifact_id, version)
+        except (WorkspaceNotFound, ArtifactNotFound) as exc:
+            raise HTTPException(status_code=404, detail="Artifact version not found") from exc
+        except ArtifactError as exc:
+            raise HTTPException(status_code=503, detail="Artifact content is unavailable") from exc
+        return FileResponse(path, media_type="application/octet-stream", headers={
+            "Cache-Control": "no-store", "ETag": f'"{record["sha256"]}"',
+        })
+
     def get_turn(role: str, turn_id: str):
+        if role not in ROLES:
+            try:
+                app.state.workspace.actor(role)
+            except WorkspaceNotFound as exc:
+                raise HTTPException(status_code=404, detail="Turn not found in this session") from exc
         turn = app.state.runtime.get_turn(role, turn_id)
         if turn is None:
             raise HTTPException(status_code=404, detail="Turn not found in this session")
@@ -126,14 +153,17 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
 
     @app.post("/v1/sessions/{role}/turns", status_code=202)
     async def start_turn(role: str, body: TurnInput):
-        member = app.state.teams.session(role)
-        if member is None and role not in ROLES:
-            raise HTTPException(status_code=404, detail="Session not found")
+        actor = None
+        if role not in ROLES:
+            try:
+                actor = app.state.workspace.actor(role)
+            except WorkspaceNotFound as exc:
+                raise HTTPException(status_code=404, detail="Session not found") from exc
         try:
             turn_id = app.state.runtime.start(
                 role, body.text,
-                prompt=member["prompt"] if member else None,
-                workspace_id=member["workspace_id"] if member else None,
+                prompt=actor.prompt if actor else None,
+                workspace_id=actor.workspace_id if actor else None,
             )
         except TurnConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -165,6 +195,11 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
         async def stream():
             cursor = max(after, last_event_id or 0)
             while True:
+                if role not in ROLES:
+                    try:
+                        app.state.workspace.actor(role)
+                    except WorkspaceNotFound:
+                        return
                 for event in runtime.events(turn_id, cursor):
                     cursor = event["seq"]
                     yield f"id: {cursor}\nevent: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
