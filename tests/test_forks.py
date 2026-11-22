@@ -5,11 +5,14 @@ import threading
 import time
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
-from test_collaboration import OPERATOR, Sandbox, auth, bootstrap
-from test_delegation import context
+from collaboration_runtime.fork_messages import ForkMessageInput
+from collaboration_runtime.scheduler import DeliveryScheduler
+from test_collaboration import OPERATOR, Sandbox, auth, bootstrap, send
+from test_delegation import action, confirm_all, context, create, ok, terms
 
 
 def wait_until(fn, timeout=8):
@@ -62,6 +65,163 @@ def start_turn(client, member, token, text):
     response = client.post(endpoint, headers=auth(token), json={"text": text})
     assert response.status_code == 202, response.text
     return response.json()["turn_id"]
+
+
+class DeliveryModel:
+    def __init__(self):
+        self.inputs = []
+
+    async def complete(self, messages, tools):
+        self.inputs.append(messages[-1]["content"])
+        return {"role": "assistant", "content": "completed"}
+
+
+@pytest.fixture
+def fork_delivery(tmp_path):
+    model = DeliveryModel()
+    app = create_app(model=model, sandbox=Sandbox(), state_dir=tmp_path, bootstrap=bootstrap,
+                     operator_token=OPERATOR, schedule=False)
+    with TestClient(app) as client:
+        runtime = app.state.runtime
+        scheduler = DeliveryScheduler(runtime, app.state.collaboration, app.state.workspace)
+        base, lead, others, tokens, goal = context(client)
+        lead_token = tokens[lead["member_id"]]
+        contact = others[0]
+        task_terms = terms(contact["member_id"], others[1]["member_id"])
+        draft = create(client, base, lead_token, goal, task_terms)
+        confirm_all(client, draft["proposal_id"], tokens)
+        task = ok(action(client, draft["proposal_id"], lead_token, "assign"))["task_id"]
+        anchor = start_turn(client, lead, lead_token, "delivery anchor")
+        assert terminal(client, lead["session_id"], lead_token, anchor)["status"] == "completed"
+
+        def publish(content, readers, artifact_id=None):
+            return app.state.workspace.artifacts.publish(
+                team_id=base.rsplit("/", 1)[-1], author_session_id=lead["session_id"],
+                source_path="fixture.txt", content=content, reader_session_ids=readers, artifact_id=artifact_id,
+            )
+
+        artifact = client.portal.call(publish, b"shared first version", [contact["session_id"]])
+        newer = client.portal.call(publish, b"private second version", [], artifact["artifact_id"])
+        helper = ok(client.post(f"/v1/sessions/{lead['session_id']}/forks", headers=auth(lead_token), json={
+            "request_id": uuid4().hex, "from_turn_id": anchor, "goal_id": goal, "task_id": task,
+            "expected_revision": 1, "purpose": "delivery test", "version_ids": [artifact["version_id"]],
+            "contact_session_ids": [contact["session_id"]],
+        }))["session_id"]
+
+        async def drain(claim):
+            while job := claim():
+                runtime.launch(*job)
+                await runtime.active[job[0]].task
+
+        client.portal.call(drain, scheduler._claim_one)
+        client.portal.call(drain, scheduler._claim_assistant)
+        model.inputs.clear()
+        yield client, runtime, scheduler, model, drain, base, lead_token, contact, tokens, goal, task, task_terms, helper, artifact, newer
+
+
+def post_fork_delivery(client, runtime, helper, contact, version_id):
+    return client.portal.call(runtime.fork_messages.post, helper, helper, ForkMessageInput(
+        request_id=uuid4().hex, text="formal fork delivery", recipient_session_id=contact["session_id"],
+        version_ids=[version_id],
+    ))
+
+
+@pytest.mark.parametrize("condition", ["revoked", "goal_ended", "revised", "material_unavailable"])
+@pytest.mark.parametrize("recoverable", [False, True], ids=["pending", "recoverable"])
+def test_formal_fork_delivery_stops_when_scope_ends(fork_delivery, condition, recoverable):
+    (client, runtime, scheduler, model, drain, base, lead_token, contact, tokens,
+     goal, task, task_terms, helper, artifact, _) = fork_delivery
+    message = post_fork_delivery(client, runtime, helper, contact, artifact["version_id"])
+    if recoverable:
+        job = client.portal.call(scheduler._claim_one)
+        assert job and job[0] == contact["session_id"]
+        client.portal.call(lambda: runtime._finish(job[1], "recoverable", error="fixture restart"))
+
+    def persist(sql, value):
+        with runtime.db:
+            runtime.db.execute(sql, (value,))
+
+    if condition == "revoked":
+        ok(client.post(f"/v1/forks/{helper}/revoke", headers=auth(lead_token), json={"request_id": uuid4().hex}))
+    elif condition == "goal_ended":
+        client.portal.call(persist, "UPDATE team_goals SET status = 'cancelled' WHERE id = ?", goal)
+    elif condition == "revised":
+        draft = create(client, base, lead_token, goal, {**task_terms, "deliverables": ["updated"]},
+                       task_id=task, base_revision=1)
+        confirm_all(client, draft["proposal_id"], tokens)
+        ok(action(client, draft["proposal_id"], lead_token, "update"))
+    else:
+        client.portal.call(persist, "UPDATE artifact_versions SET reader_session_ids = '[]' WHERE version_id = ?",
+                           artifact["version_id"])
+
+    ordinary = send(client, base, lead_token, request_id=uuid4().hex, text="ordinary delivery",
+                    recipient_id=contact["member_id"])
+    for _ in range(2):
+        client.portal.call(drain, scheduler._claim_one)
+    inputs = [json.loads(text)["message"] for text in model.inputs]
+    assert not any(item["id"] == message["message_id"] for item in inputs)
+    assert any(item["id"] == ordinary["message_id"] and "version_ids" not in item for item in inputs)
+    delivery, turn = client.portal.call(lambda: tuple(runtime.db.execute("""
+        SELECT d.status, t.status FROM message_deliveries d
+        LEFT JOIN scheduled_turns s USING (event_id, session_id, purpose)
+        LEFT JOIN turns t ON t.id = s.turn_id
+        WHERE d.message_id = ?
+    """, (message["message_id"],)).fetchone()))
+    assert delivery == "failed"
+    assert turn == ("interrupted" if recoverable else None)
+
+
+@pytest.mark.parametrize("legacy_recovery", [False, True], ids=["fresh", "legacy-recovery"])
+def test_fork_recipients_receive_only_pinned_authorized_versions(fork_delivery, legacy_recovery):
+    (client, runtime, scheduler, model, drain, _, _, contact, tokens,
+     _, _, _, helper, artifact, newer) = fork_delivery
+    sent = post_fork_delivery(client, runtime, helper, contact, artifact["version_id"])
+    url = f"/v1/forks/{helper}/messages"
+    token = tokens[contact["member_id"]]
+    denied = client.post(url, headers=auth(token), json={"request_id": uuid4().hex,
+                         "text": "unshared version", "version_ids": [newer["version_id"]]})
+    assert denied.status_code == 404, denied.text
+    received = ok(client.post(url, headers=auth(token), json={"request_id": uuid4().hex,
+                             "text": "assistant delivery", "version_ids": [artifact["version_id"]]}))
+    if legacy_recovery:
+        def recover_legacy_delivery():
+            _, turn_id, _, _ = scheduler._claim_one()
+            state = runtime.journal.checkpoint(turn_id)
+            history = state["history"]
+            payload = json.loads(history[0]["content"])
+            payload["message"].pop("version_ids", None)
+            history[0]["content"] = json.dumps(payload)
+            with runtime.db:
+                assert runtime.journal.advance(turn_id, state["generation"], state["step"], state["phase"], history)
+                runtime._write_finish(turn_id, "recoverable", error="fixture restart")
+
+        client.portal.call(recover_legacy_delivery)
+    client.portal.call(drain, scheduler._claim_one)
+    client.portal.call(drain, scheduler._claim_assistant)
+    formal_input, assistant_input = map(json.loads, model.inputs)
+    assert formal_input["message"]["id"] == sent["message_id"]
+    assert formal_input["message"]["version_ids"] == [artifact["version_id"]]
+    assert assistant_input["message_id"] == received["message_id"]
+    assert assistant_input["version_ids"] == [artifact["version_id"]]
+    assert all(newer["version_id"] not in text for text in model.inputs)
+
+
+def test_claimed_fork_delivery_rechecks_scope_before_model(fork_delivery):
+    (client, runtime, scheduler, model, _, _, lead_token, contact, _,
+     _, _, _, helper, artifact, _) = fork_delivery
+    post_fork_delivery(client, runtime, helper, contact, artifact["version_id"])
+    job = client.portal.call(scheduler._claim_one)
+    assert job and job[0] == contact["session_id"]
+    ok(client.post(f"/v1/forks/{helper}/revoke", headers=auth(lead_token), json={"request_id": uuid4().hex}))
+
+    async def run_claimed():
+        runtime.launch(*job)
+        await runtime.active[job[0]].task
+
+    client.portal.call(run_claimed)
+    assert not model.inputs
+    row = client.portal.call(lambda: runtime.db.execute("SELECT status FROM turns WHERE id = ?", (job[1],)).fetchone())
+    assert row["status"] == "interrupted"
 
 
 def test_fork_history_authorization_parallel_replay_and_revocation(tmp_path):
@@ -211,8 +371,6 @@ def test_contact_private_answer_and_parent_result_decisions(tmp_path):
 
 
 def test_t004_scope_closes_after_registration_and_old_task_revision_fails(tmp_path):
-    from test_delegation import action, confirm_all, create, terms
-
     with TestClient(application(tmp_path, Model())) as client:
         base, lead, others, tokens, goal = context(client)
         token = tokens[lead["member_id"]]

@@ -265,12 +265,23 @@ class Runtime:
     async def _run(self, role: str, turn: ActiveTurn, prompt, workspace_id):
         scheduled = self._scheduled(turn.id)
         is_fork = self.forks is not None and self.forks.exists(role)
+        fork_delivery = self.db.execute("""
+            SELECT d.message_id FROM scheduled_turns s JOIN message_deliveries d USING (event_id, session_id, purpose)
+            WHERE s.turn_id = ? AND d.purpose = 'fork.message'
+        """, (turn.id,)).fetchone() if scheduled else None
+
+        def check_scope():
+            if is_fork:
+                self._check_assistant_job(role, turn.id)
+            elif fork_delivery is not None:
+                return self.fork_messages.authorize_message(role, fork_delivery["message_id"])
+
         try:
             instructions = prompt if prompt is not None else ROLES[role]
             if scheduled:
                 instructions += DELIVERY_PROMPT
+            version_ids = check_scope()
             if is_fork:
-                self._check_assistant_job(role, turn.id)
                 instructions += (
                     f"\n\nYou are the restricted assistant {role}. "
                     "Consider the explicitly shared history and relay results using send_fork_message with assistant_id "
@@ -282,13 +293,19 @@ class Runtime:
             prior = [{"role": "system", "content": instructions}, *prior_history]
             checkpoint = self.journal.checkpoint(turn.id)
             current, step, phase = (checkpoint[key] for key in ("history", "step", "phase"))
+            if version_ids is not None:
+                payload = json.loads(current[0]["content"])
+                if payload["message"].get("version_ids") != version_ids:
+                    payload["message"]["version_ids"] = version_ids
+                    current[0]["content"] = json.dumps(payload, ensure_ascii=False)
             while phase == "tools" or step < self.max_steps:
                 self._check_generation(turn)
-                if is_fork:
-                    self._check_assistant_job(role, turn.id)
+                check_scope()
                 if phase == "tools":
                     pause = None
                     for position, call in enumerate(current[-1].get("tool_calls") or []):
+                        if fork_delivery is not None:
+                            check_scope()
                         result, pause = await self._apply_tool(
                             role, turn, step, position, call, workspace_id, scheduled=scheduled, pause=pause,
                         )
@@ -319,9 +336,8 @@ class Runtime:
                     self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **model_identity)
                 assistant = await self.model.complete(prior + current, tools)
                 self._check_generation(turn)
-                if is_fork:
-                    self._check_assistant_job(role, turn.id)
-                elif workspace_id is not None:
+                check_scope()
+                if not is_fork and fork_delivery is None and workspace_id is not None:
                     self.workspace_tools.actor(role)
                 current.append(assistant)
                 count = len(assistant.get("tool_calls") or [])

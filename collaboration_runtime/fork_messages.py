@@ -106,11 +106,13 @@ class ForkMessages:
 
     def authorize_job(self, recipient, encoded):
         data = json.loads(encoded)
-        if data.get("type") != "fork.message":
-            return
+        if data.get("type") == "fork.message":
+            self.authorize_message(recipient, data.get("message_id"))
+
+    def authorize_message(self, recipient, message_id):
         message = self.db.execute("""
             SELECT * FROM fork_messages WHERE message_id = ? AND recipient_session_id = ?
-        """, (data.get("message_id"), recipient)).fetchone()
+        """, (message_id, recipient)).fetchone()
         if message is None:
             raise WorkspaceNotFound("Assistant message is unavailable")
         try:
@@ -118,8 +120,10 @@ class ForkMessages:
             target, _, _ = self._resolve_pair(fork, message["sender_session_id"], recipient)
             if target != recipient:
                 raise CollaborationForbidden("Assistant recipient changed")
-            self._check_versions(message["sender_session_id"], recipient, json.loads(message["version_ids"]))
-        except (TeamNotFound, TeamConflict, CollaborationForbidden) as exc:
+            version_ids = json.loads(message["version_ids"])
+            self._check_versions(message["sender_session_id"], recipient, version_ids)
+            return version_ids
+        except (TeamNotFound, TeamConflict, CollaborationForbidden, CollaborationInvalid) as exc:
             raise WorkspaceNotFound("Assistant message scope is no longer available") from exc
 
     def post(self, assistant_id, sender_session_id, body: ForkMessageInput):

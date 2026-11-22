@@ -61,12 +61,17 @@ class DeliveryScheduler:
                     actor = self.workspace.actor(session)
                     if actor.team_id != delivery['team_id']:
                         raise WorkspaceNotFound('Workspace identity unavailable')
+                    version_ids = None
+                    if delivery['purpose'] == 'fork.message':
+                        version_ids = self.runtime.fork_messages.authorize_message(session, delivery['message_id'])
                     if delivery['turn_id'] is not None:
                         self.collaboration.get_message(delivery['team_id'], principal, delivery['message_id'])
                         self.runtime.reopen_turn(delivery['turn_id'])
                         turn_id = delivery['turn_id']
                     else:
                         payload = self.collaboration.execution_input(delivery, principal)
+                        if version_ids is not None:
+                            payload['message']['version_ids'] = version_ids
                         text = json.dumps(payload, ensure_ascii=False)
                         turn_id = self.runtime.create_turn(session, text)
                         self.db.execute('''INSERT INTO scheduled_turns(turn_id, event_id, session_id, purpose)
@@ -84,8 +89,11 @@ class DeliveryScheduler:
                                        WHERE event_id = ? AND session_id = ? AND purpose = ?''',
                                     (delivery['event_id'], session, delivery['purpose']))
                     if delivery['turn_id'] is not None:
-                        self.db.execute("UPDATE turns SET status = 'interrupted', error = ? WHERE id = ? AND status = 'recoverable'",
-                                        ('Delivery identity or input unavailable', delivery['turn_id']))
+                        if delivery['purpose'] == 'fork.message':
+                            self.runtime._write_finish(delivery['turn_id'], 'interrupted', error='Fork delivery scope ended')
+                        else:
+                            self.db.execute("UPDATE turns SET status = 'interrupted', error = ? WHERE id = ? AND status = 'recoverable'",
+                                            ('Delivery identity or input unavailable', delivery['turn_id']))
             return None
 
     def _claim_assistant(self):
