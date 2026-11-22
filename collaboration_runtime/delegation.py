@@ -11,6 +11,7 @@ from .collaboration import (
     CollaborationForbidden, CollaborationInvalid, Command, ObjectId, RequestId, Text, _now,
 )
 from .local_auth import Principal
+from .task_results import TaskResults
 from .teams import TeamConflict, TeamNotFound
 
 
@@ -114,6 +115,7 @@ class DelegationService:
                 event_id INTEGER NOT NULL REFERENCES delegation_events(seq)
             );
         """)
+        self.results = TaskResults(self)
 
     def proposal_team(self, proposal_id):
         row = self.db.execute("SELECT team_id FROM delegation_proposals WHERE id = ?", (proposal_id,)).fetchone()
@@ -147,7 +149,7 @@ class DelegationService:
     @staticmethod
     def _view(record):
         return {key: value for key, value in record.items()
-                if key not in {"readers", "registration", "confirmation_events"}}
+                if key not in {"readers", "registration", "confirmation_events", "result_reference"}}
 
     def _proposal(self, team_id, proposal_id, version=None):
         row = self.db.execute("""
@@ -185,7 +187,8 @@ class DelegationService:
 
     def get_task(self, team_id, actor, task_id, revision=None):
         self.collaboration.team(team_id, actor)
-        return self._view(self._visible_task(team_id, actor, task_id, revision))
+        task = self._visible_task(team_id, actor, task_id, revision)
+        return {**self._view(task), **self.results.view(actor, task, revision)}
 
     def snapshot(self, team_id, actor):
         self.collaboration.team(team_id, actor)
@@ -198,6 +201,9 @@ class DelegationService:
                 f"SELECT id FROM {table} WHERE team_id = ? ORDER BY rowid", (team_id,),
             ))
             result[key] = [self._view(record) for record in records if self._can_read(team_id, actor, record)]
+            if key == "tasks":
+                for task in result[key]:
+                    task["status"] = self.results.status(task)
         return result
 
     def active_goals(self, team_id, actor):
@@ -225,7 +231,7 @@ class DelegationService:
         if actual != event_type or not self._can_read(team_id, actor, record):
             return None
         key = "proposal" if event_type.startswith("proposal.") else "task"
-        return {key: self._view(record)}
+        return {key: self._view(record), **self.results.event_reference(actor, record)}
 
     def execution_context(self, message_id, actor):
         row = self.db.execute(
@@ -239,7 +245,7 @@ class DelegationService:
         if event_type.startswith("proposal."):
             current = self._visible_proposal(actor.team_id, actor, record["id"], record["version"])
             return {"proposal": self._view(current)}
-        return {"task": self._view(record)}
+        return {"task": self._view(record), **self.results.event_reference(actor, record)}
 
     def _emit(self, team_id, event_type, record):
         seq = self.collaboration._event(team_id, event_type, record["id"])
@@ -496,7 +502,7 @@ class DelegationService:
             self.db.execute("UPDATE delegation_tasks SET revision = ? WHERE id = ?", (revision, task_id))
         self.db.execute("INSERT INTO delegation_revisions VALUES (?, ?, ?)", (task_id, revision, json.dumps(task)))
         event_type = "task.assigned" if initial else "task.updated"
-        event_id = self._emit(team_id, event_type, task)
+        event_id = self._emit(team_id, event_type, {**task, "status": self.results.status(task)})
         message_id = self._notify_task(team_id, actor, lead, members, task, source, event_id, event_type)
         receipt = {"proposal_id": record["id"], "version": record["version"], "task_id": task_id,
                    "revision": revision, "event_id": event_id, "notification_message_id": message_id}

@@ -22,6 +22,7 @@ from .delegation import (
     ProposalVersionInput,
 )
 from .delegation_tools import DelegationTools
+from .task_results import ReviewResultInput, SubmitResultInput
 from .git_approvals import ApprovalInput, GitApprovals
 from .git_executor import GitExecutor
 from .local_auth import LocalAuth, Principal, SESSION_COOKIE, operator_credential
@@ -307,6 +308,14 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @app.get("/v1/teams/{team_id}/tasks/{task_id}")
     async def get_task(team_id: str, task_id: str, actor: Identity, revision: Annotated[int | None, Query(ge=1)] = None):
         return app.state.delegation.get_task(team_id, actor, task_id, revision)
+
+    @app.post("/v1/teams/{team_id}/tasks/{task_id}/submissions", status_code=201)
+    async def submit_result(team_id: str, task_id: str, body: SubmitResultInput, actor: Identity):
+        return app.state.delegation.results.command(team_id, actor, task_id, body)
+
+    @app.post("/v1/teams/{team_id}/tasks/{task_id}/submissions/{submission_id}/review", status_code=201)
+    async def review_result(team_id: str, task_id: str, submission_id: str, body: ReviewResultInput, actor: Identity):
+        return app.state.delegation.results.command(team_id, actor, task_id, body, submission_id=submission_id)
 
     @app.get("/v1/teams/{team_id}/snapshot")
     async def team_snapshot(team_id: str, actor: Identity):

@@ -6,6 +6,7 @@ from pydantic import Field, ValidationError
 
 from .collaboration import CollaborationForbidden, CollaborationInvalid, Command, ObjectId
 from .delegation import CounterProposalInput, CreateProposalInput, ProposalReasonInput, ProposalVersionInput
+from .task_results import ReviewResultInput, SubmitResultInput
 from .teams import TeamConflict, TeamNotFound
 from .workspace import ASSISTANT_DRAFT_TOOLS, WorkspaceNotFound
 
@@ -32,6 +33,15 @@ class ReadTaskTool(Command):
     revision: Annotated[int, Field(ge=1)] | None = None
 
 
+class SubmitResultTool(SubmitResultInput):
+    task_id: ObjectId
+
+
+class ReviewResultTool(ReviewResultInput):
+    task_id: ObjectId
+    submission_id: ObjectId
+
+
 TOOLS = {
     "create_proposal": (CreateProposalInput, "Open an initial negotiation or propose a revision to a task."),
     "counter_proposal": (ProposalCounterTool, "Offer new terms for the current proposal version. This clears confirmations for the new version."),
@@ -42,6 +52,8 @@ TOOLS = {
     "update_task": (ProposalVersionTool, "Register a task revision after all parties confirm the current proposal and the task base still matches."),
     "get_proposal": (ReadProposalTool, "Read a proposal and the confirmations for a version you can access."),
     "get_task": (ReadTaskTool, "Read a task and its current or specified revision."),
+    "submit_result": (SubmitResultTool, "As the current task owner, submit exact published version IDs and evidence for the expected revision."),
+    "review_result": (ReviewResultTool, "As the designated reviewer, decide an exact pending submission. Provide evidence per 1-based acceptance criterion; a return needs expectations and recheck items."),
     "list_delegation": (Command, "List active goals, delegation proposals and tasks visible in your team."),
 }
 
@@ -102,6 +114,13 @@ class DelegationTools:
                 result["active_goals"] = self.service.active_goals(actor.team_id, actor)
             elif name == "create_proposal":
                 result = self.service.command(actor.team_id, actor, name, args, assistant=assistant)
+            elif name == "submit_result":
+                body = SubmitResultInput.model_validate(args.model_dump(exclude={"task_id"}))
+                result = self.service.results.command(actor.team_id, actor, args.task_id, body)
+            elif name == "review_result":
+                body = ReviewResultInput.model_validate(args.model_dump(exclude={"task_id", "submission_id"}))
+                result = self.service.results.command(actor.team_id, actor, args.task_id, body,
+                                                      submission_id=args.submission_id)
             else:
                 body = COMMAND_TYPES[name].model_validate(args.model_dump(exclude={"proposal_id"}))
                 result = self.service.command(actor.team_id, actor, name, body, proposal_id=args.proposal_id,
