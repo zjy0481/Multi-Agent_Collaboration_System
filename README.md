@@ -107,8 +107,11 @@ python -m pytest -q -s tests/test_course_integration.py
 
 ```powershell
 $env:RUN_LIVE_SEARCH_TESTS = '1'
+$env:RUN_LIVE_COURSE_SEARCH_TESTS = '1'
 python -m pytest -q -s tests/test_live_search.py
 ```
+
+第一个用例直接验证检索记录的持久化和会话读取权限。第二个用例使用真实课程模型，依次调用 `search_web`、`get_search_result`、`send_message`，按原调用 ID 核对检索编号、来源 URL 和群聊记录。真实检索验收使用本机 SearXNG `2026.11.13-8a53a6aa5` 的环回 JSON 接口，已取得 SQLite 文档来源。
 
 ## 开发与测试双角色
 

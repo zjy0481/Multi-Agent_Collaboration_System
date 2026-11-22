@@ -118,9 +118,14 @@ def test_two_roles_handoff_through_runtime_api(sandbox, tmp_path, monkeypatch):
         return httpx.Response(200, json={"choices": [{"message": message}]})
 
     client_class = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client_class(
-        transport=httpx.MockTransport(completion), **kwargs,
-    ))
+
+    def client_with_test_model(**kwargs):
+        if (kwargs.get("headers") or {}).get("Authorization") == "Bearer test-only":
+            kwargs["transport"] = httpx.MockTransport(completion)
+        return client_class(**kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", client_with_test_model)
+    monkeypatch.setenv("COLLABORATION_MODEL_MODE", "course")
     monkeypatch.setenv("COURSE_API_BASE_URL", "https://course.example/v1")
     monkeypatch.setenv("COURSE_API_MODEL", "course-test")
     monkeypatch.setenv("COURSE_API_KEY", "test-only")
