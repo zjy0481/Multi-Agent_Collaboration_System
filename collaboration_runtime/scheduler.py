@@ -41,7 +41,8 @@ class DeliveryScheduler:
                 LEFT JOIN scheduled_turns s ON s.event_id = d.event_id
                     AND s.session_id = d.session_id AND s.purpose = d.purpose
                 LEFT JOIN turns t ON t.id = s.turn_id
-                WHERE (t.status = 'recoverable' OR (s.turn_id IS NULL AND d.status = 'pending'))
+                WHERE ((t.status = 'recoverable' AND d.status = 'running')
+                       OR (s.turn_id IS NULL AND d.status = 'pending'))
                   AND NOT EXISTS (
                       SELECT 1 FROM turns live WHERE live.role = d.session_id
                       AND live.status IN ('running', 'recoverable')
@@ -138,6 +139,8 @@ class DeliveryScheduler:
         """Poll until cancelled or runtime shutdown; independent sessions can run together."""
         while not self.runtime.closing:
             try:
+                if self.collaboration.goal_lifecycle is not None:
+                    self.collaboration.goal_lifecycle.expire_due_goals()
                 while not self.runtime.closing and len(self.runtime.active) < self.max_parallel:
                     claimed = ((self._claim_assistant() or self._claim_one()) if self.assistant_first
                                else (self._claim_one() or self._claim_assistant()))

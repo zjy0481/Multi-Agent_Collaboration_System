@@ -2,7 +2,9 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+import hmac
 import json
+import math
 import os
 from pathlib import Path
 
@@ -27,6 +29,14 @@ from .forks import ForkHandoffInput, ForkInput, ForkService
 from .task_results import ReviewResultInput, SubmitResultInput
 from .git_approvals import ApprovalInput, GitApprovals
 from .git_executor import GitExecutor
+from .goal_lifecycle import (
+    AcceptanceUpdateInput,
+    ActivateGoalInput,
+    GoalLifecycle,
+    HostTerminalEventInput,
+    PreRegistrationTerminationInput,
+    TerminalInput,
+)
 from .local_auth import LocalAuth, Principal, SESSION_COOKIE, operator_credential
 from .model import load_model
 from .roles import ROLE_ID_PATTERN, RoleDefinition, RoleFileError
@@ -119,8 +129,27 @@ def _check_execution_identity(actor: Principal, role: str):
 
 
 def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, bootstrap=None, search=None,
-               operator_token: str | None = None, schedule: bool = True,
+               operator_token: str | None = None, host_token: str | None = None,
+               goal_timeout_seconds: float | None = None, schedule: bool = True,
                git_targets_dir: Path | None = None, git_executor=None) -> FastAPI:
+    configured_host_token = host_token if host_token is not None else os.environ.get("COLLABORATION_HOST_TOKEN")
+    if configured_host_token is not None:
+        configured_host_token = configured_host_token.strip()
+        configured_host_token = configured_host_token or None
+        if configured_host_token is not None and any(char.isspace() for char in configured_host_token):
+            raise ValueError("The host credential must contain no whitespace")
+    configured_goal_timeout = (
+        goal_timeout_seconds if goal_timeout_seconds is not None
+        else os.environ.get("COLLABORATION_GOAL_TIMEOUT_SECONDS")
+    )
+    if configured_goal_timeout is not None:
+        try:
+            configured_goal_timeout = float(configured_goal_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("COLLABORATION_GOAL_TIMEOUT_SECONDS must be a number") from exc
+        if not math.isfinite(configured_goal_timeout) or configured_goal_timeout <= 0:
+            raise ValueError("COLLABORATION_GOAL_TIMEOUT_SECONDS must be positive")
+
     @asynccontextmanager
     async def lifespan(app):
         state = Path(state_dir or os.environ.get("COLLABORATION_STATE_DIR", ".tmp/runtime"))
@@ -137,7 +166,11 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             )
             runtime = Runtime(selected_model, selected_sandbox, state / "runtime.sqlite3")
             teams = TeamService(runtime.db, selected_model, selected_sandbox, bootstrap)
-            auth = LocalAuth(runtime.db, teams, operator_token if operator_token is not None else operator_credential(state))
+            actual_operator_token = operator_token if operator_token is not None else operator_credential(state)
+            if (configured_host_token is not None
+                    and hmac.compare_digest(actual_operator_token, configured_host_token)):
+                raise ValueError("The host credential must differ from the local operator credential")
+            auth = LocalAuth(runtime.db, teams, actual_operator_token)
             collaboration = CollaborationService(runtime.db, teams, auth)
             selected_search = search if search is not None else SearchClient.from_env()
             workspace = WorkspaceService(runtime.db, teams, selected_sandbox, state / "team-artifacts", selected_search)
@@ -149,6 +182,10 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             forks = ForkService(runtime, collaboration, workspace, delegation)
             runtime.forks = forks
             runtime.fork_messages = ForkMessages(forks, collaboration, runtime)
+            goal_lifecycle = GoalLifecycle(
+                collaboration, delegation, runtime, goal_timeout_seconds=configured_goal_timeout,
+            )
+            collaboration.goal_lifecycle = goal_lifecycle
             workspace.assistant_access = forks.authorize_workspace
             workspace.assistant_readers = forks.material_readers
             delegation.forks = forks
@@ -158,6 +195,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             app.state.auth = auth
             app.state.collaboration = collaboration
             app.state.delegation = delegation
+            app.state.goal_lifecycle = goal_lifecycle
             target_directory = git_targets_dir or os.environ.get("COLLABORATION_GIT_TARGETS_DIR")
             executor = git_executor
             if executor is None and target_directory:
@@ -186,6 +224,15 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     app = FastAPI(title="Course collaboration runtime", lifespan=lifespan, dependencies=[Depends(_local_operator)])
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "[::1]", "testserver"])
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+    async def _host_event_identity(
+        bearer: Annotated[HTTPAuthorizationCredentials | None, Depends(HTTPBearer(auto_error=False))],
+    ):
+        if configured_host_token is None:
+            raise HTTPException(status_code=404, detail="Host event intake is not configured")
+        if bearer is None or not hmac.compare_digest(bearer.credentials, configured_host_token):
+            raise HTTPException(status_code=401, detail="A valid host credential is required",
+                                headers={"WWW-Authenticate": "Bearer"})
 
     @app.get("/", include_in_schema=False)
     async def workbench():
@@ -272,6 +319,38 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @app.post("/v1/teams/{team_id}/goals", status_code=201)
     async def register_goal(team_id: str, body: GoalInput, actor: Identity):
         return app.state.collaboration.register_goal(team_id, actor, body)
+
+    @app.get("/v1/teams/{team_id}/goals/{goal_id}")
+    async def get_goal(team_id: str, goal_id: str, actor: Identity):
+        return app.state.goal_lifecycle.get_goal(team_id, actor, goal_id)
+
+    @app.post("/v1/teams/{team_id}/goals/{goal_id}/acceptance", status_code=201)
+    async def update_goal_acceptance(team_id: str, goal_id: str, body: AcceptanceUpdateInput, actor: Identity):
+        return app.state.goal_lifecycle.update_acceptance(team_id, actor, goal_id, body)
+
+    @app.post("/v1/teams/{team_id}/goals/{goal_id}/terminate", status_code=201)
+    async def terminate_goal(team_id: str, goal_id: str, body: TerminalInput, actor: Identity):
+        return app.state.goal_lifecycle.terminate_goal(team_id, actor, goal_id, body)
+
+    @app.post("/v1/teams/{team_id}/goals/{goal_id}/activate", status_code=201)
+    async def activate_goal(team_id: str, goal_id: str, body: ActivateGoalInput, actor: Identity):
+        return app.state.goal_lifecycle.activate_goal(team_id, actor, goal_id, body)
+
+    @app.get("/v1/teams/{team_id}/assignments/{message_id}/lifecycle")
+    async def assignment_lifecycle(team_id: str, message_id: str, actor: Identity):
+        return app.state.goal_lifecycle.assignment_lifecycle(team_id, actor, message_id)
+
+    @app.post("/v1/teams/{team_id}/assignments/{message_id}/terminate", status_code=201)
+    async def terminate_assignment(team_id: str, message_id: str,
+                                   body: PreRegistrationTerminationInput, actor: Identity):
+        return app.state.goal_lifecycle.terminate_before_registration(team_id, actor, message_id, body)
+
+    @app.post("/v1/host/teams/{team_id}/goals/{goal_id}/terminal-events", status_code=201)
+    async def record_host_terminal_event(
+        team_id: str, goal_id: str, body: HostTerminalEventInput,
+        _host: Annotated[None, Depends(_host_event_identity)],
+    ):
+        return app.state.goal_lifecycle.record_host_event(team_id, goal_id, body)
 
     @app.post("/v1/teams/{team_id}/proposals", status_code=201)
     async def create_proposal(team_id: str, body: CreateProposalInput, actor: Identity):
@@ -374,7 +453,23 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @app.get("/v1/artifacts/{artifact_id}/versions/{version}")
     async def artifact_version(artifact_id: str, version: int, actor: Identity):
         if actor.session_id is None:
-            raise HTTPException(status_code=404, detail="Artifact version not found")
+            if not actor.is_operator:
+                raise HTTPException(status_code=404, detail="Artifact version not found")
+            row = app.state.runtime.db.execute("""
+                SELECT version_id, team_id, author_session_id FROM artifact_versions
+                WHERE artifact_id = ? AND version = ?
+            """, (artifact_id, version)).fetchone()
+            if row is None or not app.state.goal_lifecycle.operator_can_read_version(row["version_id"]):
+                raise HTTPException(status_code=404, detail="Artifact version not found")
+            try:
+                record, path = app.state.workspace.artifacts.resolve_number(
+                    row["team_id"], row["author_session_id"], artifact_id, version,
+                )
+            except ArtifactError as exc:
+                raise HTTPException(status_code=503, detail="Artifact content is unavailable") from exc
+            return FileResponse(path, media_type="application/octet-stream", headers={
+                "Cache-Control": "no-store", "ETag": f'"{record["sha256"]}"',
+            })
         try:
             record, path = app.state.workspace.resolve_number(actor.session_id, artifact_id, version)
         except (WorkspaceNotFound, ArtifactNotFound) as exc:
