@@ -126,7 +126,8 @@ class ForkService:
             task = self.delegation._visible_task(record['team_id'], parent, record['task_id'])
             if task['goal_id'] != record['goal_id'] or task['revision'] != record['expected_revision']:
                 raise TeamConflict('Task revision or goal has changed')
-            if task['status'] not in {'ready', 'waiting_dependencies', 'in_progress', 'waiting_human'}:
+            active_statuses = {'ready', 'waiting_dependencies', 'in_progress', 'waiting_human'}
+            if task['status'] not in active_statuses or self.delegation.results.status(task) == 'accepted':
                 raise TeamConflict('Task is no longer active')
             parties = self.delegation._parties(task['dispatcher_id'], task['terms'])
             if parent.id not in parties or not {members[s] for s in contacts} <= parties:

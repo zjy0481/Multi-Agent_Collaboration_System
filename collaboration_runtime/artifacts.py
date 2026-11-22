@@ -164,8 +164,8 @@ class ArtifactStore:
         except sqlite3.Error as exc:
             raise ArtifactError("could not query artifact") from exc
 
-    def reference_readers(self, team_id: str, version_id: str) -> set[str]:
-        """Read immutable version permissions inside a business transaction without opening the file."""
+    def reference(self, team_id: str, version_id: str) -> dict:
+        """Read immutable version metadata inside a business transaction without opening the file."""
         if not isinstance(version_id, str) or not _HEX.fullmatch(version_id):
             raise ArtifactNotFound("artifact version not found")
         row = self.db.execute(
@@ -173,7 +173,10 @@ class ArtifactStore:
         ).fetchone()
         if row is None:
             raise ArtifactNotFound("artifact version not found")
-        metadata = self._metadata(row)
+        return self._metadata(row)
+
+    def reference_readers(self, team_id: str, version_id: str) -> set[str]:
+        metadata = self.reference(team_id, version_id)
         return {metadata["author_session_id"], *metadata["reader_session_ids"]}
 
     def resolve_number(self, team_id: str, reader_session_id: str, artifact_id: str, version: int) -> tuple[dict, Path]:

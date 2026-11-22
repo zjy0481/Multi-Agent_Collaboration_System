@@ -7,6 +7,9 @@ const state = {
   participants: [],
   messages: [],
   goals: [],
+  tasks: [],
+  openTask: null,
+  taskFetch: 0,
   questions: [],
   approvals: [],
   approvalRequests: new Map(),
@@ -74,6 +77,7 @@ function showLogin() {
   $("approval-section").hidden = true;
   $("messages").replaceChildren();
   $("goals").replaceChildren();
+  resetTaskResults();
   $("questions").replaceChildren();
   state.generation++;
   state.stream?.close();
@@ -105,6 +109,7 @@ async function loadTeams() {
     $("conversations").replaceChildren();
     $("messages").replaceChildren(element("p", "暂无团队", "empty"));
     $("goals").replaceChildren();
+    resetTaskResults();
     state.questions = [];
     state.approvals = [];
     state.approvalRequests.clear();
@@ -134,6 +139,7 @@ async function loadTeam(id, preserve = false) {
   setComposerEnabled(false);
   const oldTeam = state.team;
   const oldActor = state.actor;
+  resetTaskResults();
   if (!preserve || oldTeam !== id) {
     clearDraft();
     state.peer = null;
@@ -168,6 +174,8 @@ async function loadTeam(id, preserve = false) {
     state.participants = s.participants || [];
     state.messages = s.messages || [];
     state.goals = s.goals || [];
+    state.tasks = s.tasks || [];
+    renderTaskResults();
     state.questions = s.questions || [];
     state.seq = Math.max(0, ...state.messages.map((m) => Number(m.seq) || 0));
     render();
@@ -228,6 +236,128 @@ function connect(cursor, generation) {
   stream.addEventListener("stream.reset", () => {
     if (generation === state.generation) loadTeam(state.team, true);
   });
+  for (const type of ["task.assigned", "task.updated", "task.submitted", "task.approved", "task.returned", "task.needs_recheck"]) {
+    stream.addEventListener(type, (event) => {
+      if (generation !== state.generation) return;
+      try {
+        const { task } = JSON.parse(event.data);
+        const index = state.tasks.findIndex((item) => item.id === task.id);
+        if (index < 0) state.tasks.push(task);
+        else state.tasks[index] = task;
+        const open = state.openTask;
+        renderTaskResults();
+        if (open) openTaskResult(open);
+      } catch (_) {
+        notice("无法读取任务更新，请刷新工作台");
+      }
+    });
+  }
+}
+
+const taskStatus = {
+  ready: "就绪",
+  waiting_dependencies: "等待依赖",
+  pending_review: "待验",
+  returned: "已退回",
+  accepted: "已通过",
+  needs_recheck: "待复核",
+};
+
+function resetTaskResults() {
+  state.tasks = [];
+  state.openTask = null;
+  state.taskFetch++;
+  $("task-results").replaceChildren();
+}
+
+function renderTaskResults() {
+  const list = $("task-results");
+  list.replaceChildren();
+  if (!state.tasks.length) list.append(element("p", "暂无可读任务", "empty"));
+  for (const task of state.tasks) {
+    const row = element("div", null, "goal");
+    const button = element("button", `${task.terms.deliverables[0]} · ${taskStatus[task.status] || task.status}`);
+    button.type = "button";
+    button.setAttribute("aria-expanded", "false");
+    button.setAttribute("aria-controls", `task-detail-${task.id}`);
+    button.onclick = () => {
+      if (state.openTask === task.id) {
+        state.openTask = null;
+        state.taskFetch++;
+        renderTaskResults();
+      } else {
+        renderTaskResults();
+        openTaskResult(task.id);
+      }
+    };
+    const detail = element("div");
+    detail.id = `task-detail-${task.id}`;
+    row.append(button, detail);
+    list.append(row);
+  }
+}
+
+function addResultNotes(parent, title, notes) {
+  if (!notes.length) return;
+  const list = element("ul");
+  for (const note of notes) list.append(element("li", note));
+  parent.append(element("strong", title), list);
+}
+
+function resultVersionList(versions) {
+  const list = element("ul");
+  for (const version of versions) {
+    const link = element("a", `${version.source_path} · v${version.version}`);
+    link.href = `/v1/artifacts/${encodeURIComponent(version.artifact_id)}/versions/${encodeURIComponent(version.version)}`;
+    link.download = version.source_path.split(/[\\/]/).pop();
+    const item = element("li");
+    item.append(link, element("div", `版本 ID：${version.version_id}`));
+    list.append(item);
+  }
+  return list;
+}
+
+async function openTaskResult(taskId) {
+  const detail = $(`task-detail-${taskId}`);
+  if (!detail) return;
+  state.openTask = taskId;
+  const request = ++state.taskFetch;
+  detail.previousElementSibling.setAttribute("aria-expanded", "true");
+  detail.textContent = "正在读取交付详情";
+  try {
+    const task = await api(`/v1/teams/${encodeURIComponent(state.team)}/tasks/${encodeURIComponent(taskId)}`);
+    if (request !== state.taskFetch) return;
+    const result = task.result;
+    detail.replaceChildren(element("p", `任务修订 ${task.revision} · ${taskStatus[task.status] || task.status}`));
+    if (result.stale_input_versions.length)
+      detail.append(element("strong", "需复核的旧输入版本"), resultVersionList(result.stale_input_versions));
+    if (!result.submissions.length) detail.append(element("p", "暂无可读提交", "empty"));
+    for (const submission of result.submissions) {
+      const entry = element("details");
+      const current = submission.id === result.current_submission_id;
+      entry.open = current;
+      entry.append(element("summary", `${current ? "当前提交" : "历史提交"} · 修订 ${submission.task_revision} · ${formatTime(submission.created_at)}`));
+      entry.append(element("p", `提交 ${submission.id} · 负责人 ${nameOf(submission.owner_id)}`));
+      if (submission.previous_return_id) entry.append(element("p", `关联退回决定 ${submission.previous_return_id}`));
+      entry.append(resultVersionList(submission.versions));
+      addResultNotes(entry, "验证证据", submission.evidence);
+      addResultNotes(entry, "遗留问题", submission.open_issues);
+      const review = submission.review;
+      if (review) {
+        entry.append(element("p", `${review.decision === "approved" ? "通过" : "退回"} · 主审 ${nameOf(review.reviewer_id)} · ${formatTime(review.created_at)}`));
+        entry.append(element("p", `审查决定 ${review.id}`));
+        addResultNotes(entry, "审查依据", review.findings.map((finding) =>
+          `${finding.requirement}：${finding.met ? "通过" : "未通过"}；${finding.evidence}`));
+        if (review.expected) entry.append(element("p", `退回预期：${review.expected}`));
+        addResultNotes(entry, "复验项", review.recheck_items);
+      } else {
+        entry.append(element("p", "尚无审查决定"));
+      }
+      detail.append(entry);
+    }
+  } catch (error) {
+    if (request === state.taskFetch) detail.textContent = error.message;
+  }
 }
 async function refreshApprovals(team, generation) {
   const request = ++state.approvalFetch;
