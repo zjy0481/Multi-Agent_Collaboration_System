@@ -216,22 +216,26 @@ small {
   margin: 5px 0 14px;
 }
 .goal,
-.question {
+.question,
+.approval {
   border-top: 1px solid #e5ebef;
   padding: 12px 0;
   font-size: 0.85rem;
   overflow-wrap: anywhere;
 }
 .goal strong,
-.question strong {
+.question strong,
+.approval strong {
   display: block;
   margin-bottom: 5px;
 }
-.question button {
+.question button,
+.approval button {
   font-size: 0.78rem;
   padding: 4px 8px;
   margin-top: 7px;
 }
+.approval button { margin-right: 6px; }
 .login {
   max-width: 420px;
   margin: 8vh auto;

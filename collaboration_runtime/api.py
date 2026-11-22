@@ -17,6 +17,8 @@ from typing import Annotated
 
 from .artifacts import ArtifactError, ArtifactNotFound
 from .collaboration import CollaborationForbidden, CollaborationInvalid, CollaborationService, GoalInput, MessageInput
+from .git_approvals import ApprovalInput, GitApprovals
+from .git_executor import GitExecutor
 from .local_auth import LocalAuth, Principal, SESSION_COOKIE, operator_credential
 from .model import load_model
 from .roles import ROLE_ID_PATTERN, RoleDefinition, RoleFileError
@@ -109,7 +111,8 @@ def _check_execution_identity(actor: Principal, role: str):
 
 
 def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, bootstrap=None, search=None,
-               operator_token: str | None = None, schedule: bool = True) -> FastAPI:
+               operator_token: str | None = None, schedule: bool = True,
+               git_targets_dir: Path | None = None, git_executor=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         state = Path(state_dir or os.environ.get("COLLABORATION_STATE_DIR", ".tmp/runtime"))
@@ -118,6 +121,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
         teams = None
         selected_search = None
         scheduler = None
+        approval_worker = None
         try:
             state.mkdir(parents=True, exist_ok=True)
             selected_sandbox = sandbox if sandbox is not None else DockerSandbox(
@@ -136,13 +140,22 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             app.state.workspace = workspace
             app.state.auth = auth
             app.state.collaboration = collaboration
+            target_directory = git_targets_dir or os.environ.get("COLLABORATION_GIT_TARGETS_DIR")
+            executor = git_executor
+            if executor is None and target_directory:
+                executor = GitExecutor(state / "git", Path(target_directory))
+            runtime.git_approvals = GitApprovals(runtime, collaboration, workspace, executor) if executor else None
+            if runtime.git_approvals is not None:
+                approval_worker = asyncio.create_task(runtime.git_approvals.run())
             if schedule:
                 scheduler = asyncio.create_task(DeliveryScheduler(runtime, collaboration, workspace).run())
             yield
         finally:
-            if scheduler is not None:
-                scheduler.cancel()
-                await asyncio.gather(scheduler, return_exceptions=True)
+            workers = [worker for worker in (scheduler, approval_worker) if worker is not None]
+            for worker in workers:
+                worker.cancel()
+            if workers:
+                await asyncio.gather(*workers, return_exceptions=True)
             if teams is not None:
                 await teams.close()
             if runtime is not None:
@@ -241,6 +254,28 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @app.get("/v1/teams/{team_id}/snapshot")
     async def team_snapshot(team_id: str, actor: Identity):
         return app.state.collaboration.snapshot(team_id, actor)
+
+    @app.get("/v1/teams/{team_id}/approvals", dependencies=[Depends(_require_operator)])
+    async def pending_approvals(team_id: str, actor: Identity):
+        approvals = app.state.runtime.git_approvals
+        if approvals is None:
+            app.state.collaboration.team(team_id, actor)
+            return []
+        return approvals.list_pending(team_id, actor)
+
+    @app.post("/v1/approvals/{approval_id}/decision", dependencies=[Depends(_require_operator)])
+    async def decide_approval(approval_id: str, body: ApprovalInput):
+        approvals = app.state.runtime.git_approvals
+        if approvals is None:
+            raise TeamNotFound("Push approval not found")
+        return approvals.decide(approval_id, body)
+
+    @app.get("/v1/teams/{team_id}/git-actions/{action_id}")
+    async def read_git_action(team_id: str, action_id: str, actor: Identity):
+        approvals = app.state.runtime.git_approvals
+        if approvals is None:
+            raise TeamNotFound("Git action not found")
+        return approvals.get_action(team_id, actor, action_id)
 
     @app.get("/v1/teams/{team_id}/events", response_class=EventSourceResponse)
     async def team_events(

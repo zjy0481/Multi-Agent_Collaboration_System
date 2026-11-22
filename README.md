@@ -78,6 +78,20 @@ $team.members | Select-Object role_id, name, session_id, workspace_id
 
 真实 HKGAI 抽查使用课程模型 `t2_hkgai-v3_fp8_1m_e7`。模型在第一步调用 `list_participants`，第二步用真实返回的成员 ID 调用 `send_message` 写入群内进展。两次回执保留原调用 ID，回合状态为 `completed`。该抽查使用临时团队与沙箱替身，Docker 隔离由独立回归验证。
 
+## T011 真人审批 Git 推送
+
+安装 Git，准备仅由本机操作者管理的裸仓库，并在启动服务的进程设置目标目录。目标名称是裸仓库文件夹名去掉 `.git`。
+
+```powershell
+New-Item -ItemType Directory -Force -Path .tmp/git-remotes | Out-Null
+git init --bare .tmp/git-remotes/demo.git
+$env:COLLABORATION_GIT_TARGETS_DIR = (Resolve-Path .tmp/git-remotes).Path
+```
+
+在群里将工作派给成员。成员从私有工作区选择文件，用 `create_git_commit` 形成提交，再用 `request_push` 提交仓库、目标 ref、完整 SHA 和请求键。工作台「待审批推送」显示精确参数。操作者批准后才会执行一次普通快进推送，拒绝则把结果投递回原会话。若推送后结果不明，服务重启时核对原目标 ref 并且不重发。原成员也可用 `get_git_action` 查看状态。
+
+T011 使用本地可控裸仓库完成验收，真实 GitHub 交付由 T016 验证。
+
 ## 开发与测试双角色
 
 打开本机的 [接口交互页](http://127.0.0.1:8000/docs)，或在另一个 PowerShell 中使用：

@@ -76,6 +76,7 @@ class UnknownToolOutcome(Exception):
 REPLAYABLE_TOOLS = {
     "ask_human", "get_message", "list_participants", "register_goal", "send_message",
     "list_artifacts", "list_workspace_readers", "read_artifact", "read_file", "get_search_result",
+    "get_git_action", "request_push",
 }
 
 DELIVERY_PROMPT = (
@@ -101,6 +102,7 @@ class Runtime:
         self.closing = False
         self.workspace_tools = None
         self.collaboration = None
+        self.git_approvals = None
         self.db = sqlite3.connect(database)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -228,7 +230,8 @@ class Runtime:
 
     def _history(self, role: str) -> list[dict]:
         rows = self.db.execute(
-            "SELECT history FROM turns WHERE role = ? AND status IN ('completed', 'waiting_human') ORDER BY rowid",
+            "SELECT history FROM turns WHERE role = ? AND status IN ('completed', 'waiting_human', 'waiting_approval') "
+            "ORDER BY rowid",
             (role,),
         )
         return [message for row in rows for message in json.loads(row["history"])]
@@ -253,24 +256,26 @@ class Runtime:
             while phase == "tools" or step < self.max_steps:
                 self._check_generation(turn)
                 if phase == "tools":
-                    waiting = False
+                    pause = None
                     for position, call in enumerate(current[-1].get("tool_calls") or []):
-                        result, waiting = await self._apply_tool(
-                            role, turn, step, position, call, workspace_id, scheduled=scheduled, waiting=waiting,
+                        result, pause = await self._apply_tool(
+                            role, turn, step, position, call, workspace_id, scheduled=scheduled, pause=pause,
                         )
                         current.append({"role": "tool", "tool_call_id": call["id"],
                                         "content": json.dumps(result, ensure_ascii=False)})
                     phase = "model"
                     with self.db:
                         self._advance(turn, step, phase, current)
-                        if waiting:
-                            self._write_finish(turn.id, "waiting_human", history=current)
+                        if pause:
+                            self._write_finish(turn.id, pause, history=current)
                             return
                     continue
 
                 tools = self.workspace_tools.tools_for(role) if workspace_id is not None else TOOLS
                 if workspace_id is not None and self.collaboration is not None:
                     tools.extend(self.collaboration.tools_for(role))
+                if workspace_id is not None and self.git_approvals is not None:
+                    tools.extend(self.git_approvals.tools_for(role, scheduled))
                 model_identity = getattr(self.model, "identity", {"mode": "injected", "endpoint": None, "model": None})
                 with self.db:
                     for new_text in self.journal.drain_inputs(turn.id, turn.generation):
@@ -323,7 +328,7 @@ class Runtime:
             if self.active.get(role) is turn:
                 self.active.pop(role)
 
-    async def _apply_tool(self, role, turn, step, position, call, workspace_id, *, scheduled, waiting):
+    async def _apply_tool(self, role, turn, step, position, call, workspace_id, *, scheduled, pause):
         self._check_generation(turn)
         name = call["function"]["name"]
         call_id = call["id"]
@@ -331,12 +336,12 @@ class Runtime:
         receipt = self.journal.receipt(turn.id, step, position)
         if receipt and receipt["state"] == "completed":
             result = receipt["result"]
-            return result, waiting or self._question_pauses(name, result, scheduled)
+            return result, pause or self._tool_pause(name, result, scheduled)
         if receipt and name not in REPLAYABLE_TOOLS:
             raise UnknownToolOutcome(f"Check the outcome of {name} ({call_id}) before retrying this work")
 
         pending = self.journal.checkpoint(turn.id)["pending"]
-        skip_reason = ("Work is waiting for a human answer." if waiting else
+        skip_reason = ("Work is waiting for human input." if pause else
                        "Input changed. Decide again before using this tool." if pending and receipt is None else None)
         if workspace_id is not None:
             self.workspace_tools.actor(role)
@@ -348,9 +353,9 @@ class Runtime:
             else:
                 result = {"ok": False, "error": skip_reason}
                 self._complete_tool(turn, step, position, name, call_id, result, "tool.skipped")
-                return result, waiting
+                return result, pause
         try:
-            result = await self._execute_tool(role, turn, name, arguments, workspace_id, scheduled)
+            result = await self._execute_tool(role, turn, call_id, name, arguments, workspace_id, scheduled)
         except (WorkspaceNotFound, asyncio.CancelledError):
             raise
         except Exception as exc:
@@ -359,19 +364,24 @@ class Runtime:
             raise
         with self.db:
             self._complete_tool(turn, step, position, name, call_id, result, "tool.completed")
-        return result, self._question_pauses(name, result, scheduled)
+        return result, self._tool_pause(name, result, scheduled)
 
     def _complete_tool(self, turn, step, position, name, call_id, result, outcome):
         if not self.journal.complete_tool(turn.id, turn.generation, step, position, result):
             raise StaleTurn
         self._event(turn.id, outcome, name=name, tool_call_id=call_id, generation=turn.generation, result=result)
 
-    def _question_pauses(self, name, result, scheduled):
+    def _tool_pause(self, name, result, scheduled):
         if name == "ask_human" and result["ok"]:
-            return scheduled or self.collaboration.question_waiting(result["result"]["question"]["question_id"])
-        return False
+            if scheduled or self.collaboration.question_waiting(result["result"]["question"]["question_id"]):
+                return "waiting_human"
+        if name == "request_push" and result["ok"] and result["result"]["pause"]:
+            return "waiting_approval"
+        return None
 
-    async def _execute_tool(self, role, turn, name, arguments, workspace_id, scheduled):
+    async def _execute_tool(self, role, turn, call_id, name, arguments, workspace_id, scheduled):
+        if workspace_id is not None and self.git_approvals is not None and self.git_approvals.handles(name):
+            return await self.git_approvals.execute(role, turn.id, turn.generation, call_id, name, arguments)
         if workspace_id is not None and self.collaboration is not None and self.collaboration.handles(name):
             work = None
             if scheduled and name == "ask_human":

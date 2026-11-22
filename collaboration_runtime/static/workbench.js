@@ -8,6 +8,9 @@ const state = {
   messages: [],
   goals: [],
   questions: [],
+  approvals: [],
+  approvalRequests: new Map(),
+  approvalFetch: 0,
   peer: null,
   reply: null,
   stream: null,
@@ -64,6 +67,11 @@ function showLogin() {
   state.messages = [];
   state.goals = [];
   state.questions = [];
+  state.approvals = [];
+  state.approvalRequests.clear();
+  state.approvalFetch++;
+  $("approvals").replaceChildren();
+  $("approval-section").hidden = true;
   $("messages").replaceChildren();
   $("goals").replaceChildren();
   $("questions").replaceChildren();
@@ -98,6 +106,11 @@ async function loadTeams() {
     $("messages").replaceChildren(element("p", "暂无团队", "empty"));
     $("goals").replaceChildren();
     state.questions = [];
+    state.approvals = [];
+    state.approvalRequests.clear();
+    state.approvalFetch++;
+    $("approvals").replaceChildren();
+    $("approval-section").hidden = true;
     $("questions").replaceChildren();
     return;
   }
@@ -137,6 +150,11 @@ async function loadTeam(id, preserve = false) {
   state.stream?.close();
   state.stream = null;
   state.team = id;
+  state.approvals = [];
+  if (!preserve || oldTeam !== id) state.approvalRequests.clear();
+  state.approvalFetch++;
+  $("approvals").replaceChildren();
+  $("approval-section").hidden = true;
   $("connection").textContent = "正在加载";
   try {
     const s = await api(`/v1/teams/${encodeURIComponent(id)}/snapshot`);
@@ -155,6 +173,7 @@ async function loadTeam(id, preserve = false) {
     render();
     setComposerEnabled(true);
     connect(s.cursor, generation);
+    if (state.actor === "local-operator") refreshApprovals(id, generation);
   } catch (e) {
     if (generation === state.generation) {
       $("connection").textContent = "加载失败";
@@ -180,6 +199,8 @@ function connect(cursor, generation) {
       if (generation !== state.generation) return;
       try {
         const data = JSON.parse(event.data);
+        if (type === "message.created" && data.message?.kind === "approval" && state.actor === "local-operator")
+          refreshApprovals(state.team, generation);
         if (Number(data.seq) <= state.seq) return;
         state.seq = Number(data.seq);
         if (
@@ -207,6 +228,76 @@ function connect(cursor, generation) {
   stream.addEventListener("stream.reset", () => {
     if (generation === state.generation) loadTeam(state.team, true);
   });
+}
+async function refreshApprovals(team, generation) {
+  const request = ++state.approvalFetch;
+  try {
+    const approvals = await api(`/v1/teams/${encodeURIComponent(team)}/approvals`);
+    if (generation !== state.generation || team !== state.team || request !== state.approvalFetch || state.actor !== "local-operator") return;
+    state.approvals = approvals.filter((a) => a.status === "awaiting_approval");
+    renderApprovals();
+  } catch (e) {
+    if (generation === state.generation && team === state.team && request === state.approvalFetch) notice(`审批列表加载失败：${e.message}`);
+  }
+}
+function safeRepository(value) {
+  // Display only a sanitized address; the original remains in the signed decision body.
+  return String(value).replace(/(\w+:\/\/)[^/@\s]+@/g, "$1[已隐藏]@").replace(/^[^/@\s]+@/, "[已隐藏]@").replace(/[?#].*$/, "?[已隐藏]");
+}
+function renderApprovals() {
+  const section = $("approval-section");
+  section.hidden = state.actor !== "local-operator";
+  const list = $("approvals");
+  list.replaceChildren();
+  if (section.hidden) return;
+  if (!state.approvals.length) list.append(element("p", "暂无待审批推送", "empty"));
+  for (const approval of state.approvals) {
+    const row = element("div", null, "approval");
+    row.append(element("strong", "推送请求"),
+      element("div", `仓库：${safeRepository(approval.repository)}`),
+      element("div", `目标 ref：${approval.ref}`),
+      element("div", `提交 SHA：${approval.sha}`),
+      element("div", `摘要：${approval.digest}`));
+    if (approval.member_id) row.append(element("div", `申请人：${nameOf(approval.member_id)}`));
+    for (const [decision, label] of [["approve", "批准此提交"], ["reject", "拒绝"]]) {
+      const button = element("button", label);
+      button.type = "button";
+      button.disabled = !!state.approvalRequests.get(approval.approval_id)?.busy;
+      button.onclick = () => decideApproval(approval, decision);
+      row.append(button);
+    }
+    list.append(row);
+  }
+}
+async function decideApproval(approval, decision) {
+  const team = state.team, generation = state.generation;
+  let pending = state.approvalRequests.get(approval.approval_id);
+  if (pending?.busy) return;
+  if (pending && pending.decision !== decision) {
+    notice("上次决定的结果尚未确认，请重试相同决定或刷新审批列表。");
+    return;
+  }
+  if (!pending) pending = {request_id: key(), decision, busy: false};
+  pending.busy = true;
+  state.approvalRequests.set(approval.approval_id, pending);
+  renderApprovals();
+  try {
+    await api(`/v1/approvals/${encodeURIComponent(approval.approval_id)}/decision`, {
+      method: "POST",
+      body: JSON.stringify({request_id: pending.request_id, decision, action: approval.action,
+        repository: approval.repository, ref: approval.ref, sha: approval.sha, digest: approval.digest}),
+    });
+    if (generation !== state.generation || team !== state.team) return;
+    state.approvals = state.approvals.filter((a) => a.approval_id !== approval.approval_id);
+    state.approvalRequests.delete(approval.approval_id);
+    notice(decision === "approve" ? "已批准该提交的推送" : "已拒绝该推送");
+    await refreshApprovals(team, generation);
+  } catch (e) {
+    if (generation === state.generation && team === state.team) notice(`审批结果未确认：${e.message}；可重试相同决定`);
+  } finally {
+    pending.busy = false;
+    if (generation === state.generation && team === state.team) renderApprovals();
+  }
 }
 function messageSummary(id) {
   const message = state.messages.find((m) => m.id === id);
