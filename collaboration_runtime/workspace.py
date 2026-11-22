@@ -36,6 +36,7 @@ class Actor:
 
 ASSISTANT_DRAFT_TOOLS = frozenset({"create_proposal", "counter_proposal"})
 ASSISTANT_FORK_TOOLS = frozenset({"send_fork_message"})
+ASSISTANT_EXPERIENCE_TOOLS = frozenset({"retrieve_lessons", "read_lesson", "read_handoff"})
 
 
 class ToolArgs(BaseModel):
@@ -150,7 +151,9 @@ class WorkspaceService:
             raise WorkspaceNotFound("Parent or assistant identity is unavailable")
         if UUID(session_id).hex != session_id or not scope_id.strip() or not prompt.strip():
             raise ValueError("A stable assistant ID, scope and prompt are required")
-        if not set(allowed_tools) <= TOOLS.keys() | ASSISTANT_DRAFT_TOOLS | ASSISTANT_FORK_TOOLS:
+        if not set(allowed_tools) <= (
+            TOOLS.keys() | ASSISTANT_DRAFT_TOOLS | ASSISTANT_FORK_TOOLS | ASSISTANT_EXPERIENCE_TOOLS
+        ):
             raise ValueError("Assistant tools must be registered workspace tools")
         for version_id in version_ids:
             self.artifacts.resolve(parent.team_id, parent.session_id, version_id)
