@@ -80,6 +80,7 @@ REPLAYABLE_TOOLS = {
     "list_artifacts", "list_workspace_readers", "read_artifact", "read_file", "get_search_result",
     "get_git_action", "request_push",
     "fork_session", "send_fork_message", "decide_fork_result",
+    "get_goal", "update_goal_acceptance", "close_goal", "activate_goal",
 } | DELEGATION_TOOLS.keys()
 
 DELIVERY_PROMPT = (
@@ -273,6 +274,14 @@ class Runtime:
                 self._check_assistant_job(role, turn.id)
             elif fork_message_id is not None:
                 return self.fork_messages.authorize_message(role, fork_message_id)
+            elif scheduled:
+                delivery = self.db.execute("""
+                    SELECT d.status FROM scheduled_turns s
+                    JOIN message_deliveries d USING (event_id, session_id, purpose)
+                    WHERE s.turn_id = ?
+                """, (turn.id,)).fetchone()
+                if delivery is None or delivery["status"] != "running":
+                    raise StaleTurn
 
         try:
             instructions = prompt if prompt is not None else ROLES[role]
