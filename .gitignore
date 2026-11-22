@@ -1,6 +1,7 @@
 /docs/handoff/
 /docs/research/
 /docs/teammate/
+/docs/monitor/
 /.tmp/
 __pycache__/
 .pytest_cache/
