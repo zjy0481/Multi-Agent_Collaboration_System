@@ -281,16 +281,88 @@ class GoalLifecycle:
                 ("terminal_id", "goal_id", "source_message_id", "outcome", "actor_kind",
                  "reason", "server_time")}
 
+    def _can_read_task_acceptance(self, team_id, actor, task_id, acceptance):
+        if acceptance is None:
+            return False
+        try:
+            self.delegation._visible_task(team_id, actor, task_id)
+        except TeamNotFound:
+            return False
+        return self.delegation.results._can_read_versions(team_id, actor, acceptance)
+
+    def _can_read_final_version(self, team_id, actor, version_id):
+        if actor.is_operator:
+            return self.operator_can_read_version(version_id)
+        if actor.session_id is None:
+            return False
+        try:
+            return actor.session_id in self.delegation.artifacts.reference_readers(team_id, version_id)
+        except ArtifactNotFound:
+            return False
+
+    def _project_frozen(self, team_id, actor, frozen, outcome):
+        authorized_acceptances = {}
+        required = []
+        for item in frozen["required_deliveries"]:
+            projected = {key: item[key] for key in ("name", "task_id", "accepted")}
+            acceptance = item.get("acceptance")
+            if self._can_read_task_acceptance(team_id, actor, item["task_id"], acceptance):
+                projected.update({
+                    "acceptance": acceptance,
+                    "versions": item.get("versions", []),
+                    "submission_id": item.get("submission_id"),
+                    "review_id": item.get("review_id"),
+                })
+            required.append(projected)
+        for task_id, acceptance in frozen.get("task_acceptance", {}).items():
+            if self._can_read_task_acceptance(team_id, actor, task_id, acceptance):
+                authorized_acceptances[task_id] = acceptance
+        final_versions = []
+        if outcome == "completed":
+            final_versions = [
+                version for version in frozen.get("final_versions", [])
+                if self._can_read_final_version(team_id, actor, version["version_id"])
+            ]
+        return {
+            "metric_version": frozen["metric_version"],
+            "goal_id": frozen["goal_id"],
+            "source_message_id": frozen["source_message_id"],
+            "acceptance_revision": frozen["acceptance_revision"],
+            "acceptance_required_deliveries": [
+                {key: item[key] for key in ("name", "task_id")}
+                for item in frozen.get("acceptance_required_deliveries", [])
+            ],
+            "required_deliveries": required,
+            "effective_task_ids": frozen["effective_task_ids"],
+            "accepted_task_ids": frozen["accepted_task_ids"],
+            "task_acceptance": authorized_acceptances,
+            "final_versions": final_versions,
+            "open_question_ids": frozen["open_question_ids"],
+            "closed_proposal_ids": frozen["closed_proposal_ids"],
+            "evidence": frozen["evidence"],
+            "raw_counts": frozen["raw_counts"],
+        }
+
+    def _terminal_view(self, team, actor, terminal):
+        if terminal is None:
+            return None
+        if not self._is_full_reader(team, actor):
+            return self._compact_terminal(terminal)
+        return {
+            **terminal,
+            "frozen": self._project_frozen(team["team_id"], actor, terminal["frozen"], terminal["outcome"]),
+        }
+
     def enrich_goal(self, team_id, actor, goal):
         acceptance = self._acceptance(goal["id"])
         terminal = self._terminal(goal_id=goal["id"])
+        team = self.collaboration.teams.get(team_id)
         return {
             **goal,
             "acceptance": acceptance,
             "prerequisites": self._prerequisites(goal["id"]),
             "deadline_at": self._deadline(goal["id"]),
-            "terminal": terminal if self._is_full_reader(self.collaboration.teams.get(team_id), actor)
-            else self._compact_terminal(terminal),
+            "terminal": self._terminal_view(team, actor, terminal),
         }
 
     def get_goal(self, team_id, actor, goal_id):
@@ -315,16 +387,14 @@ class GoalLifecycle:
         return acceptance
 
     def assignment_lifecycle(self, team_id, actor, source_message_id):
-        self.collaboration.team(team_id, actor)
+        team = self.collaboration.team(team_id, actor)
         row, source = self._goal_by_source(team_id, actor, source_message_id)
         terminal = self._terminal(source_message_id=source["id"])
         if row is not None:
             goal = self.enrich_goal(team_id, actor, dict(row))
         else:
             goal = None
-        if terminal is not None and not self._is_full_reader(self.collaboration.teams.get(team_id), actor):
-            terminal = self._compact_terminal(terminal)
-        return {"goal": goal, "terminal": terminal}
+        return {"goal": goal, "terminal": self._terminal_view(team, actor, terminal)}
 
     def initialize_goal(self, team_id, goal_id, actor_id):
         record = {"required_deliveries": [], "created_at": _now(), "created_by": actor_id}
@@ -514,7 +584,6 @@ class GoalLifecycle:
         }
 
     def _freeze(self, team, goal, acceptance, evidence, final_version_ids, scope):
-        lead = self._lead_principal(team)
         goal_id = goal["id"] if goal is not None else None
         task_ids = [row["id"] for row in self.db.execute(
             "SELECT id FROM delegation_tasks WHERE team_id = ? AND goal_id = ? ORDER BY rowid",
@@ -522,8 +591,8 @@ class GoalLifecycle:
         )] if goal_id is not None else []
         task_acceptance = {}
         for task_id in task_ids:
-            task_acceptance[task_id] = self.delegation.results.current_acceptance(
-                team["team_id"], lead, goal_id, task_id,
+            task_acceptance[task_id] = self.delegation.results.current_acceptance_fact(
+                team["team_id"], goal_id, task_id,
             )
         accepted_task_ids = [task_id for task_id in task_ids if task_acceptance[task_id] is not None]
         required = []
