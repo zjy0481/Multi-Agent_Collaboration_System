@@ -125,7 +125,8 @@ def test_two_roles_handoff_through_runtime_api(sandbox, tmp_path, monkeypatch):
     monkeypatch.setenv("COURSE_API_MODEL", "course-test")
     monkeypatch.setenv("COURSE_API_KEY", "test-only")
 
-    with TestClient(create_app(sandbox=sandbox, state_dir=tmp_path)) as client:
+    with TestClient(create_app(sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token')) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
         for role, reply in (("developer", "Published."), ("tester", "Verified.")):
             endpoint = f"/v1/sessions/{role}/turns"
             response = client.post(endpoint, json={"text": "Run the sample task"})
@@ -168,7 +169,8 @@ def test_registered_member_sessions_use_independent_docker_workspaces(sandbox, t
 
     workspaces = []
     try:
-        with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap)) as client:
+        with TestClient(create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token', bootstrap=bootstrap)) as client:
+            client.headers.update({"Authorization": "Bearer test-operator-token"})
             teams = []
             for index, (directory, lead_role) in enumerate(samples):
                 roster = (sample_root / directory / "01_role_initialization.md").read_text(encoding="utf-8")
@@ -194,9 +196,11 @@ def test_registered_member_sessions_use_independent_docker_workspaces(sandbox, t
             same_role_elsewhere = next(member for member in generated["members"] if member["role_id"] == "dev")
             expected_prompt = developer["prompt"]
             path = f"/v1/sessions/{developer['session_id']}/turns"
-            turn = client.post(path, json={"text": "Run your workspace smoke check"}).json()["turn_id"]
-            client.get(f"{path}/{turn}/events")
-            assert client.get(f"{path}/{turn}").json()["reply"] == "Workspace write succeeded"
+            credential = client.post(f"/v1/teams/{teams[0]['team_id']}/members/{developer['member_id']}/credential").json()["token"]
+            member_auth = {"Authorization": f"Bearer {credential}"}
+            turn = client.post(path, json={"text": "Run your workspace smoke check"}, headers=member_auth).json()["turn_id"]
+            client.get(f"{path}/{turn}/events", headers=member_auth)
+            assert client.get(f"{path}/{turn}", headers=member_auth).json()["reply"] == "Workspace write succeeded"
             assert run_ok(sandbox, developer["workspace_id"], "cat owner.txt") == "t001"
             run_ok(sandbox, same_role_elsewhere["workspace_id"], "test ! -e owner.txt")
             added = client.post(f"/v1/teams/{teams[0]['team_id']}/members", json={
@@ -226,8 +230,9 @@ def test_registered_members_file_tools_and_version_handoff(sandbox, tmp_path, mo
     roster = (sample / "01_role_initialization.md").read_text(encoding="utf-8")
     workspaces = []
     try:
-        app = create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap)
+        app = create_app(model=Model(), sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token', bootstrap=bootstrap)
         with TestClient(app) as client:
+            client.headers.update({"Authorization": "Bearer test-operator-token"})
             response = client.post("/v1/teams", json={"request_id": "t005-docker", "roster": roster})
             assert response.status_code == 201, response.text
             members = {item["role_id"]: item for item in response.json()["members"]}
@@ -270,9 +275,10 @@ def test_registered_members_file_tools_and_version_handoff(sandbox, tmp_path, mo
             assert not tool(outsider, "read_file", path="private.txt")["ok"]
             assert ok(outsider, "run_command", command='test -z "$COURSE_API_KEY" && test ! -e private.txt')["exit_code"] == 0
 
+            tokens = {role: client.post(f"/v1/teams/{response.json()['team_id']}/members/{members[role]['member_id']}/credential").json()["token"] for role in ("qa", "release")}
             endpoint = f"/v1/artifacts/{version1['artifact_id']}/versions/1"
-            assert client.get(endpoint, headers={"X-Session-ID": tester}).text == old
-            assert client.get(endpoint, headers={"X-Session-ID": outsider}).status_code == 404
+            assert client.get(endpoint, headers={"Authorization": f"Bearer {tokens['qa']}"}).text == old
+            assert client.get(endpoint, headers={"Authorization": f"Bearer {tokens['release']}"}).status_code == 404
             assert ok(dev, "run_command", command="ln -s package nested-link; ln -s private.txt unsafe.txt")["exit_code"] == 0
             for unsafe in ("nested-link/booking.py", "unsafe.txt"):
                 assert not tool(dev, "read_file", path=unsafe)["ok"]
@@ -281,7 +287,7 @@ def test_registered_members_file_tools_and_version_handoff(sandbox, tmp_path, mo
             ok(dev, "delete_file", path=path)
             assert not tool(dev, "read_file", path=path)["ok"]
             assert ok(dev, "read_file", path="private.txt")["content"] == "private"
-            assert client.get(endpoint, headers={"X-Session-ID": tester}).text == old
+            assert client.get(endpoint, headers={"Authorization": f"Bearer {tokens['qa']}"}).text == old
     finally:
         if workspaces:
             sandbox.cleanup(*workspaces)
