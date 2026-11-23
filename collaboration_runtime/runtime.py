@@ -11,7 +11,7 @@ from uuid import uuid4
 from .collaboration import CollaborationInvalid
 from .delegation_tools import TOOLS as DELEGATION_TOOLS
 from .experience import ExperienceTools
-from .journal import ExecutionJournal
+from .journal import ExecutionJournal, GOAL_CONFIRMATION_PHASE
 from .model import ModelError
 from .sandbox import SandboxError
 from .workspace import WorkspaceNotFound
@@ -96,6 +96,14 @@ class ActiveTurn:
     id: str
     generation: int
     task: asyncio.Task | None = None
+
+
+@dataclass(frozen=True)
+class CloseGoalCall:
+    turn: ActiveTurn
+    step: int
+    position: int
+    call_id: str
 
 
 class Runtime:
@@ -215,7 +223,10 @@ class Runtime:
         turn = self.active.get(role)
         if self.closing or turn is None or turn.id != turn_id:
             raise TurnConflict("This is no longer the running turn")
-        if len(self.journal.checkpoint(turn_id)["pending"]) >= 16:
+        checkpoint = self.journal.checkpoint(turn_id)
+        if checkpoint["phase"] == GOAL_CONFIRMATION_PHASE:
+            raise TurnConflict("This turn is confirming a closed goal")
+        if len(checkpoint["pending"]) >= 16:
             raise TurnConflict("The turn already has too many pending inputs")
         with self.db:
             self.journal.queue_input(turn_id, text)
@@ -286,6 +297,10 @@ class Runtime:
                     raise StaleTurn
 
         try:
+            checkpoint = self.journal.checkpoint(turn.id)
+            if checkpoint["phase"] == GOAL_CONFIRMATION_PHASE:
+                await self._confirm_goal_close(turn)
+                return
             instructions = prompt if prompt is not None else ROLES[role]
             if scheduled:
                 instructions += DELIVERY_PROMPT
@@ -305,7 +320,6 @@ class Runtime:
             else:
                 prior_history = self._history(role)
             prior = [{"role": "system", "content": instructions}, *prior_history]
-            checkpoint = self.journal.checkpoint(turn.id)
             current, step, phase = (checkpoint[key] for key in ("history", "step", "phase"))
             if version_ids is not None:
                 payload = json.loads(current[0]["content"])
@@ -322,6 +336,9 @@ class Runtime:
                         result, pause = await self._apply_tool(
                             role, turn, step, position, call, workspace_id, scheduled=scheduled, pause=pause,
                         )
+                        if call["function"]["name"] == "close_goal" and self.journal.confirming_goal(turn.id):
+                            await self._confirm_goal_close(turn)
+                            return
                         current.append({"role": "tool", "tool_call_id": call["id"],
                                         "content": json.dumps(result, ensure_ascii=False)})
                     phase = "model"
@@ -422,16 +439,69 @@ class Runtime:
                 self._complete_tool(turn, step, position, name, call_id, result, "tool.skipped")
                 return result, pause
         try:
-            result = await self._execute_tool(role, turn, call_id, name, arguments, workspace_id, scheduled)
+            close_call = CloseGoalCall(turn, step, position, call_id) if name == "close_goal" else None
+            result = await self._execute_tool(role, turn, call_id, name, arguments, workspace_id, scheduled,
+                                              close_call=close_call)
         except (WorkspaceNotFound, asyncio.CancelledError):
             raise
         except Exception as exc:
             if name not in REPLAYABLE_TOOLS:
                 raise UnknownToolOutcome(f"Check the outcome of {name} ({call_id}) before retrying this work") from exc
             raise
-        with self.db:
-            self._complete_tool(turn, step, position, name, call_id, result, "tool.completed")
+        if close_call is None or not self.journal.confirming_goal(turn.id):
+            with self.db:
+                self._complete_tool(turn, step, position, name, call_id, result, "tool.completed")
         return result, self._tool_pause(name, result, scheduled)
+
+    def record_goal_close(self, call: CloseGoalCall, receipt: dict):
+        """Called inside the goal terminal transaction."""
+        turn = call.turn
+        if not self.journal.begin_goal_confirmation(turn.id, turn.generation, call.step):
+            raise StaleTurn
+        self._complete_tool(turn, call.step, call.position, "close_goal", call.call_id,
+                            {"ok": True, "result": receipt}, "tool.completed")
+
+    async def _confirm_goal_close(self, turn):
+        self._check_generation(turn)
+        checkpoint = self.journal.checkpoint(turn.id)
+        history, step = checkpoint["history"], checkpoint["step"]
+        decision = history[-1]
+        closing_pair = None
+        with self.db:
+            for position, call in enumerate(decision["tool_calls"]):
+                call_id = call["id"]
+                name, arguments = (call["function"][key] for key in ("name", "arguments"))
+                receipt = self.journal.receipt(turn.id, step, position)
+                if receipt is not None and receipt["state"] == "completed":
+                    result = receipt["result"]
+                else:
+                    result = {"ok": False, "error": "This goal has ended. No further tools may run in this turn."}
+                    if not self.journal.start_tool(turn.id, turn.generation, step, position, call_id, name, arguments):
+                        raise StaleTurn
+                    self._complete_tool(turn, step, position, name, call_id, result, "tool.skipped")
+                message = {"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, ensure_ascii=False)}
+                history.append(message)
+                if name == "close_goal" and result["ok"]:
+                    closing_pair = [{"role": "assistant", "content": None, "tool_calls": [call]}, message]
+            if closing_pair is None:
+                raise ModelError("The closed goal has no recorded tool receipt")
+            identity = getattr(self.model, "identity", {"mode": "injected", "endpoint": None, "model": None})
+            self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **identity)
+
+        # The closed work scope grants a confirmation only, without another tool decision.
+        response = await self.model.complete([
+            {"role": "system", "content": "The goal has ended. Summarize the recorded close_goal result "
+                                           "in a short final reply. No further actions are available."},
+            {"role": "user", "content": "Confirm the goal's recorded terminal outcome."},
+            *closing_pair,
+        ], [])
+        self._check_generation(turn)
+        text = response.get("content")
+        if response.get("tool_calls") or not text or not text.strip():
+            raise ModelError("The model did not provide a text confirmation of the closed goal")
+        with self.db:
+            self._event(turn.id, "model.completed", step=step + 1, generation=turn.generation, tool_count=0)
+            self._write_finish(turn.id, "completed", reply=text, history=[*history, response])
 
     def _complete_tool(self, turn, step, position, name, call_id, result, outcome):
         if not self.journal.complete_tool(turn.id, turn.generation, step, position, result):
@@ -446,7 +516,7 @@ class Runtime:
             return "waiting_approval"
         return None
 
-    async def _execute_tool(self, role, turn, call_id, name, arguments, workspace_id, scheduled):
+    async def _execute_tool(self, role, turn, call_id, name, arguments, workspace_id, scheduled, *, close_call=None):
         if workspace_id is not None and self.forks is not None:
             if name == "fork_session":
                 return await self.forks.execute_create(role, arguments)
@@ -463,7 +533,7 @@ class Runtime:
                     SELECT d.message_id FROM scheduled_turns s JOIN message_deliveries d
                         USING (event_id, session_id, purpose) WHERE s.turn_id = ?
                 """, (turn.id,)).fetchone()["message_id"]
-            return self.collaboration.execute_tool(role, name, arguments, work_message_id=work)
+            return self.collaboration.execute_tool(role, name, arguments, work_message_id=work, close_call=close_call)
         if workspace_id is not None:
             return await self.workspace_tools.execute(role, name, arguments)
         return await asyncio.to_thread(self._dispatch, role, name, arguments)
