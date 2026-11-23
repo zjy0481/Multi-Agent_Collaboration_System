@@ -61,8 +61,13 @@ $team.members | Select-Object role_id, name
 
 在「任务交付」展开有权读取的任务，即可查看当前与历史提交、验证证据和审查决定。点击具体版本链接下载文件。
 
+课程模型临时故障会有限重试。对于重试耗尽或达到步数上限的回合，本机操作者可通过 API 的 `POST /v1/sessions/{session_id}/turns/{turn_id}/retry` 续跑。
+
+检索支持上游状态和受控原文读取，具体接入条件见[本地环境配置指南](docs/environment-setup.md)。
+
 ## 参考
 
 - [本机 API 文档](http://127.0.0.1:8000/docs)
 - [项目详细需求](docs/grill_result/agent-collaboration/requirement.md)
 - [真实环境联调记录](docs/live-validation.md)
+- [T015 官方样例验收记录](docs/validation/t015-second-fix-rerun.md)
