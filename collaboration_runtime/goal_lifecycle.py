@@ -639,7 +639,7 @@ class GoalLifecycle:
             },
         }
 
-    def _close_scope(self, team_id, actor_id, goal_id, source_message_id, scope):
+    def _close_scope(self, team_id, actor_id, goal_id, source_message_id, scope, *, confirming_turn_id=None):
         now = _now()
         active_tasks = []
         for question in scope["questions"]:
@@ -664,7 +664,13 @@ class GoalLifecycle:
                 WHERE message_id IN ({placeholders})
                   AND status IN ('pending', 'running', 'blocked', 'recoverable',
                                  'waiting_human', 'waiting_approval')
-            """, tuple(scope["message_ids"]))
+                  AND NOT EXISTS (
+                      SELECT 1 FROM scheduled_turns s WHERE s.turn_id = ?
+                      AND (s.event_id, s.session_id, s.purpose) = (
+                          message_deliveries.event_id, message_deliveries.session_id, message_deliveries.purpose
+                      )
+                  )
+            """, (*scope["message_ids"], confirming_turn_id))
             scheduled = self.db.execute(f"""
                 SELECT d.event_id, d.session_id, d.purpose, s.turn_id, t.status AS turn_status
                 FROM message_deliveries d
@@ -674,6 +680,8 @@ class GoalLifecycle:
                   AND t.status IN ('running', 'recoverable', 'waiting_human', 'waiting_approval')
             """, tuple(scope["message_ids"])).fetchall()
             for delivery in scheduled:
+                if delivery["turn_id"] == confirming_turn_id:
+                    continue
                 self.runtime.journal.next_generation(delivery["turn_id"])
                 self.runtime._write_finish(delivery["turn_id"], "interrupted", error="Goal ended")
                 active = self.runtime.active.get(delivery["session_id"])
@@ -789,7 +797,7 @@ class GoalLifecycle:
             except (ArtifactError, ArtifactNotFound) as exc:
                 raise TeamNotFound("Final version is not readable") from exc
 
-    def terminate_goal(self, team_id, actor, goal_id, body: TerminalInput):
+    def terminate_goal(self, team_id, actor, goal_id, body: TerminalInput, *, close_call=None):
         key = (team_id, actor.id, "terminate_goal", body.request_id)
         payload = body.model_dump(exclude={"request_id"})
         payload["final_version_ids"] = sorted(set(payload["final_version_ids"]))
@@ -824,8 +832,18 @@ class GoalLifecycle:
                     )
                 except (ArtifactError, ArtifactNotFound) as exc:
                     raise TeamNotFound("Final version is not readable") from exc
-            scope["source_message_id"] = goal["source_message_id"]
-            active_tasks = self._close_scope(team_id, actor.id, goal_id, goal["source_message_id"], scope)
+            if close_call is not None:
+                delivery = self.db.execute("""
+                    SELECT d.message_id FROM scheduled_turns s JOIN message_deliveries d
+                    USING (event_id, session_id, purpose) JOIN turns t ON t.id = s.turn_id
+                    WHERE s.turn_id = ? AND s.session_id = ? AND d.status = 'running' AND t.status = 'running'
+                """, (close_call.turn.id, actor.session_id)).fetchone()
+                if delivery is None or delivery["message_id"] not in scope["message_ids"]:
+                    close_call = None
+            active_tasks = self._close_scope(
+                team_id, actor.id, goal_id, goal["source_message_id"], scope,
+                confirming_turn_id=close_call.turn.id if close_call else None,
+            )
             self.db.execute("UPDATE team_goals SET status = ? WHERE id = ?", (body.outcome, goal_id))
             event_id = self.collaboration._event(team_id, f"goal.{body.outcome}", goal_id)
             terminal_id, server_time = self._insert_terminal(
@@ -843,6 +861,8 @@ class GoalLifecycle:
                                     server_time, frozen, message_id, event_id, actor.id,
                                     "lead" if body.outcome in {"completed", "failed"} else "user")
             self.collaboration._save_receipt(key, digest, receipt)
+            if close_call is not None:
+                self.runtime.record_goal_close(close_call, receipt)
         for active in active_tasks:
             if active is not None:
                 active.cancel()
@@ -1018,7 +1038,7 @@ class GoalLifecycle:
     def handles(self, name):
         return name in TOOLS
 
-    def execute(self, session_id, name, raw_arguments):
+    def execute(self, session_id, name, raw_arguments, *, close_call=None):
         actor = self.collaboration.auth.member(session_id)
         if actor is None:
             return {"ok": False, "error": "Goal tools require a formal member session"}
@@ -1035,6 +1055,7 @@ class GoalLifecycle:
                 result = self.terminate_goal(
                     actor.team_id, actor, args.goal_id,
                     TerminalInput(**args.model_dump(exclude={"goal_id"})),
+                    close_call=close_call,
                 )
             else:
                 result = self.activate_goal(

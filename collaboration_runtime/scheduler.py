@@ -65,7 +65,8 @@ class DeliveryScheduler:
                     if actor.team_id != delivery['team_id']:
                         raise WorkspaceNotFound('Workspace identity unavailable')
                     version_ids = None
-                    if fork_message_id is not None:
+                    confirming = delivery["turn_id"] is not None and self.runtime.journal.confirming_goal(delivery["turn_id"])
+                    if fork_message_id is not None and not confirming:
                         version_ids = self.runtime.fork_messages.authorize_message(session, fork_message_id)
                     if delivery['turn_id'] is not None:
                         self.collaboration.get_message(delivery['team_id'], principal, delivery['message_id'])
