@@ -24,6 +24,7 @@ from .delegation import (
     ProposalVersionInput,
 )
 from .delegation_tools import DelegationTools
+from .evaluation_reports import EvaluationReports
 from .experience import ExperienceService, ExperienceTools, build_router
 from .fork_messages import ForkDecisionInput, ForkMessageInput, ForkMessages
 from .forks import ForkHandoffInput, ForkInput, ForkService
@@ -202,6 +203,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             app.state.experience = experience
             app.state.experience_tools = experience_tools
             app.state.goal_lifecycle = goal_lifecycle
+            app.state.evaluation_reports = EvaluationReports(collaboration)
             target_directory = git_targets_dir or os.environ.get("COLLABORATION_GIT_TARGETS_DIR")
             executor = git_executor
             if executor is None and target_directory:
@@ -330,6 +332,16 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @app.get("/v1/teams/{team_id}/goals/{goal_id}")
     async def get_goal(team_id: str, goal_id: str, actor: Identity):
         return app.state.goal_lifecycle.get_goal(team_id, actor, goal_id)
+
+    @app.get("/v1/goals/{goal_id}/report")
+    async def goal_report(goal_id: str, actor: Identity):
+        return app.state.evaluation_reports.goal(actor, goal_id)
+
+    @app.get("/v1/teams/{team_id}/evaluation/report")
+    async def evaluation_report(
+        team_id: str, actor: Identity, assignment_ids: Annotated[list[RequestId] | None, Query()] = None,
+    ):
+        return app.state.evaluation_reports.assignments(team_id, actor, assignment_ids or [])
 
     @app.post("/v1/teams/{team_id}/goals/{goal_id}/acceptance", status_code=201)
     async def update_goal_acceptance(team_id: str, goal_id: str, body: AcceptanceUpdateInput, actor: Identity):
