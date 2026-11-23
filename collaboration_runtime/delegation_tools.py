@@ -9,6 +9,7 @@ from .delegation import CounterProposalInput, CreateProposalInput, ProposalReaso
 from .task_results import ReviewResultInput, SubmitResultInput
 from .teams import TeamConflict, TeamNotFound
 from .workspace import ASSISTANT_DRAFT_TOOLS, WorkspaceNotFound
+from .validation_feedback import validation_feedback
 
 
 class ProposalCounterTool(CounterProposalInput):
@@ -42,6 +43,12 @@ class ReviewResultTool(ReviewResultInput):
     submission_id: ObjectId
 
 
+class ListDelegationTool(Command):
+    compact: bool = False
+    goal_id: ObjectId | None = None
+    limit: Annotated[int, Field(ge=1, le=100)] = 50
+
+
 TOOLS = {
     "create_proposal": (CreateProposalInput, "Open an initial negotiation or propose a revision to a task."),
     "counter_proposal": (ProposalCounterTool, "Offer new terms for the current proposal version. This clears confirmations for the new version."),
@@ -54,7 +61,7 @@ TOOLS = {
     "get_task": (ReadTaskTool, "Read a task and its current or specified revision."),
     "submit_result": (SubmitResultTool, "As the current task owner, submit exact published version IDs and evidence for the expected revision."),
     "review_result": (ReviewResultTool, "As the designated reviewer, decide an exact pending submission. Provide evidence per 1-based acceptance criterion; a return needs expectations and recheck items."),
-    "list_delegation": (Command, "List active goals, delegation proposals and tasks visible in your team."),
+    "list_delegation": (ListDelegationTool, "List visible goals, proposals and tasks. Use compact=true to find your next action; goal_id and limit filter compact results."),
 }
 
 COMMAND_TYPES = {
@@ -110,8 +117,13 @@ class DelegationTools:
             elif name == "get_task":
                 result = self.service.get_task(actor.team_id, actor, args.task_id, args.revision)
             elif name == "list_delegation":
-                result = self.service.snapshot(actor.team_id, actor)
-                result["active_goals"] = self.service.active_goals(actor.team_id, actor)
+                if args.compact:
+                    result = self.service.compact_snapshot(actor.team_id, actor, goal_id=args.goal_id, limit=args.limit)
+                else:
+                    if args.model_fields_set.intersection({"goal_id", "limit"}):
+                        raise CollaborationInvalid("goal_id and limit require compact mode")
+                    result = self.service.snapshot(actor.team_id, actor)
+                    result["active_goals"] = self.service.active_goals(actor.team_id, actor)
             elif name == "create_proposal":
                 result = self.service.command(actor.team_id, actor, name, args, assistant=assistant)
             elif name == "submit_result":
@@ -126,8 +138,9 @@ class DelegationTools:
                 result = self.service.command(actor.team_id, actor, name, body, proposal_id=args.proposal_id,
                                               assistant=assistant)
             return {"ok": True, "result": result}
-        except ValidationError:
-            return {"ok": False, "error": "Invalid delegation tool arguments", "status": 422}
+        except ValidationError as exc:
+            return {"ok": False, "error": "Invalid delegation tool arguments", "status": 422,
+                    "errors": validation_feedback(exc, TOOLS[name][0])}
         except (WorkspaceNotFound, TeamNotFound, TeamConflict, CollaborationForbidden, CollaborationInvalid) as exc:
             if isinstance(exc, TeamConflict):
                 status = 409

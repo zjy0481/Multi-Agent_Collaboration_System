@@ -77,6 +77,12 @@ class DelegationService:
         self.artifacts = workspace.artifacts
         self.forks = None
         self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS assignment_required_inputs (
+                message_id TEXT NOT NULL REFERENCES team_messages(id),
+                owner_id TEXT NOT NULL,
+                version_id TEXT NOT NULL,
+                PRIMARY KEY (message_id, owner_id, version_id)
+            );
             CREATE TABLE IF NOT EXISTS delegation_tasks (
                 id TEXT PRIMARY KEY,
                 team_id TEXT NOT NULL REFERENCES teams(team_id),
@@ -207,6 +213,52 @@ class DelegationService:
                     task["status"] = self.results.status(task)
         return result
 
+    def compact_snapshot(self, team_id, actor, goal_id=None, limit=50):
+        """Return a bounded, ACL-filtered overview of current delegation state."""
+        self.collaboration.team(team_id, actor)
+        if goal_id is not None:
+            self._goal(team_id, actor, goal_id)
+        if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= 100:
+            raise CollaborationInvalid("Limit must be between 1 and 100")
+        goals = self.active_goals(team_id, actor)
+        result = {"active_goals": [{field: goal[field] for field in ("id", "status", "revision")}
+                                   for goal in goals if goal_id is None or goal["id"] == goal_id],
+                  "proposals": [], "tasks": [], "truncated": {}}
+        for key, table, versions, id_column, current in (
+            ("proposals", "delegation_proposals", "delegation_versions", "proposal_id", "current_version"),
+            ("tasks", "delegation_tasks", "delegation_revisions", "task_id", "revision"),
+        ):
+            version_column = "version" if key == "proposals" else "revision"
+            query = (f"SELECT v.data FROM {table} p JOIN {versions} v "
+                     f"ON v.{id_column} = p.id AND v.{version_column} = p.{current} "
+                     "WHERE p.team_id = ?")
+            params = [team_id]
+            if goal_id is not None:
+                query += " AND p.goal_id = ?"
+                params.append(goal_id)
+            query += " ORDER BY p.rowid DESC"
+            result["truncated"][key] = False
+            for row in self.db.execute(query, params):
+                record = json.loads(row["data"])
+                if not self._can_read(team_id, actor, record):
+                    continue
+                if len(result[key]) == limit:
+                    result["truncated"][key] = True
+                    break
+                if key == "proposals":
+                    item = {field: record[field] for field in
+                            ("id", "goal_id", "task_id", "scope_id", "version", "status")}
+                    item["pending_member_ids"] = (sorted(set(record["required_member_ids"]) -
+                                                          set(record["confirmation_ids"]))
+                                                  if record["status"] == "open" else [])
+                else:
+                    item = {field: record[field] for field in ("id", "goal_id", "revision")}
+                    item.update(status=self.results.status(record),
+                                owner_id=record["terms"]["owner_id"],
+                                reviewer_id=record["terms"]["reviewer_id"])
+                result[key].append(item)
+        return result
+
     def active_goals(self, team_id, actor):
         self.collaboration.team(team_id, actor)
         goals = []
@@ -289,12 +341,19 @@ class DelegationService:
                 self.collaboration._message_for(team_id, member, record["source_message_id"])
             except TeamNotFound as exc:
                 raise CollaborationForbidden("A commitment party cannot read the goal source") from exc
-        for version_id in terms["input_version_ids"]:
+        declared = set(record.get("required_input_version_ids", []))
+        declared.update(row["version_id"] for row in self.db.execute(
+            "SELECT version_id FROM assignment_required_inputs WHERE message_id = ? AND owner_id = ?",
+            (record["source_message_id"], terms["owner_id"])))
+        for version_id in sorted(set(terms["input_version_ids"]) | declared):
             readers = self.artifacts.reference_readers(team_id, version_id)
             if actor.session_id not in readers:
                 raise TeamNotFound("Input version not found")
             if any(member.session_id not in readers for member in participants):
                 raise CollaborationForbidden("An input version is not shared with every commitment party")
+        missing = sorted(declared - set(terms["input_version_ids"]))
+        if missing:
+            raise CollaborationInvalid("Missing required input version IDs: " + ", ".join(missing))
         self._validate_links(team_id, participants, record)
 
     @staticmethod
@@ -516,6 +575,7 @@ class DelegationService:
             "revision": revision, "dispatcher_id": record["dispatcher_id"], "registrar_id": actor.id,
             "source_message_id": record["source_message_id"], "proposal_id": record["id"],
             "proposal_version": record["version"], "created_at": _now(),
+            "required_input_version_ids": record.get("required_input_version_ids", []),
             "status": "waiting_dependencies" if terms["dependency_ids"] else "ready",
             "readers": sorted(self._parties(record["dispatcher_id"], terms) | {lead}),
         }
