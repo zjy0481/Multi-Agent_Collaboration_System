@@ -5,6 +5,8 @@ import threading
 import time
 from uuid import uuid4
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
@@ -35,6 +37,7 @@ def call(name, call_id, arguments):
 class ClosingModel:
     """A deterministic double: only the test's trigger can request closure."""
     def __init__(self):
+        self.outcome = "completed"
         self.goal_id = None
         self.next_goal_id = None
         self.final_version = None
@@ -69,7 +72,9 @@ class ClosingModel:
             return {"role": "assistant", "content": None, "tool_calls": [
                 call("close_goal", "close-call", {
                     "request_id": "close-from-supplement", "goal_id": self.goal_id,
-                    "expected_revision": 2, "outcome": "completed", "final_version_ids": [self.final_version],
+                    "expected_revision": 2, "outcome": self.outcome,
+                    **({"final_version_ids": [self.final_version]} if self.outcome == "completed" else
+                       {"reason": "Unable to finish", "evidence": ["Execution failed"]}),
                 }),
                 call("send_message", "after-close-side-effect", {
                     "request_id": "after-close", "text": "SIDE_EFFECT_MUST_NOT_EXIST", "kind": "progress",
@@ -157,7 +162,8 @@ def test_scheduled_supplement_close_preserves_receipt_and_activates_next_goal(tm
         assert client.portal.call(queued_delivery) == ("cancelled", None)
 
 
-def test_restart_during_close_confirmation_reuses_receipt_once(tmp_path):
+@pytest.mark.parametrize("outcome", ["completed", "failed"])
+def test_restart_during_close_confirmation_reuses_receipt_once(tmp_path, outcome):
     class PausedConfirmation(ClosingModel):
         async def complete(self, messages, tools):
             if messages[-1].get("role") == "tool" and messages[-1].get("tool_call_id") == "close-call":
@@ -166,6 +172,7 @@ def test_restart_during_close_confirmation_reuses_receipt_once(tmp_path):
             return await super().complete(messages, tools)
 
     first_model = PausedConfirmation()
+    first_model.outcome = outcome
     with TestClient(create_scheduled_app(tmp_path, first_model)) as client:
         base, lead, tokens, initial, first, second = prepare_goals(client, first_model)
         lead_token = tokens[lead["member_id"]]
@@ -183,6 +190,15 @@ def test_restart_during_close_confirmation_reuses_receipt_once(tmp_path):
                 (supplement["message_id"],)).fetchone()
             return row[0] if row else None
         turn_id = wait_until(lambda: client.portal.call(original))
+
+        def original_receipt():
+            row = client.app.state.runtime.db.execute(
+                "SELECT result FROM execution_receipts WHERE turn_id=? AND call_id='close-call'", (turn_id,),
+            ).fetchone()
+            return row[0] if row else None
+
+        receipt = wait_until(lambda: client.portal.call(original_receipt))
+        assert json.loads(receipt)["result"]["status"] == outcome
         assert client.post(
             f"/v1/sessions/{lead['session_id']}/turns/{turn_id}/steer",
             headers=auth(lead_token), json={"text": "Start another tool"},
@@ -192,6 +208,10 @@ def test_restart_during_close_confirmation_reuses_receipt_once(tmp_path):
     recovery.next_goal_id = second
     with TestClient(create_scheduled_app(tmp_path, recovery)) as client:
         assert recovery.saw_close_receipt.wait(8)
+        messages, tools = recovery.confirmation
+        assert tools == []
+        assert messages[-1]["tool_call_id"] == "close-call"
+        assert json.loads(messages[-1]["content"]) == json.loads(receipt)
         def recovered():
             r = client.get(f"/v1/sessions/{lead['session_id']}/turns/{turn_id}", headers=auth(lead_token))
             return r.json() if r.status_code == 200 and r.json()["status"] == "completed" else None
@@ -202,5 +222,63 @@ def test_restart_during_close_confirmation_reuses_receipt_once(tmp_path):
             terminal = db.execute("SELECT COUNT(*) FROM goal_terminal_facts WHERE goal_id=?", (first,)).fetchone()[0]
             receipts = db.execute("SELECT COUNT(*) FROM execution_receipts WHERE turn_id=? AND call_id='close-call' AND state='completed'", (turn_id,)).fetchone()[0]
             activations = db.execute("SELECT COUNT(*) FROM collaboration_events WHERE team_id=? AND type='goal.activated' AND object_id=?", (base.rsplit('/',1)[-1], second)).fetchone()[0]
-            return terminal, receipts, activations
-        assert client.portal.call(counts) == (1, 1, 1)
+            skipped = db.execute("""SELECT result FROM execution_receipts
+                WHERE turn_id=? AND call_id='after-close-side-effect'""", (turn_id,)).fetchone()
+            notifications = db.execute("""SELECT COUNT(*) FROM message_deliveries
+                WHERE purpose='goal.terminal' AND session_id=?""", (lead["session_id"],)).fetchone()[0]
+            return terminal, receipts, activations, json.loads(skipped[0])["ok"], notifications
+        assert client.portal.call(counts) == (1, 1, 1, False, 1)
+        assert lifecycle(client, base, lead_token, first)["goal"]["status"] == outcome
+        snapshot = client.get(f"{base}/snapshot", headers=auth(OPERATOR)).json()
+        assert all(m["text"] != "SIDE_EFFECT_MUST_NOT_EXIST" for m in snapshot["messages"])
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_manual_close_preserves_receipt_and_skips_remaining_tools(tmp_path, replay):
+    model = ClosingModel()
+    app = create_app(model=model, sandbox=Sandbox(), state_dir=tmp_path,
+                     bootstrap=bootstrap, operator_token=OPERATOR, schedule=False)
+    with TestClient(app) as client:
+        base, lead, tokens, _, first, _ = prepare_goals(client, model)
+        token = tokens[lead["member_id"]]
+        if replay:
+            closed = client.post(f"{base}/goals/{first}/terminate", headers=auth(token), json={
+                "request_id": "close-from-supplement", "expected_revision": 2, "outcome": "completed",
+                "final_version_ids": [model.final_version],
+            })
+            assert closed.status_code == 201, closed.text
+        endpoint = f"/v1/sessions/{lead['session_id']}/turns"
+        started = client.post(endpoint, headers=auth(token), json={"text": "CLOSE_GOAL_TRIGGER"})
+        assert started.status_code == 202, started.text
+        turn_id = started.json()["turn_id"]
+
+        def finished():
+            response = client.get(f"{endpoint}/{turn_id}", headers=auth(token))
+            return response.json() if response.status_code == 200 and response.json()["status"] != "running" else None
+
+        turn = wait_until(finished)
+        assert turn["status"] == "completed", turn
+        assert model.saw_close_receipt.wait(8)
+
+        def receipts():
+            return [dict(row) for row in client.app.state.runtime.db.execute(
+                "SELECT * FROM execution_receipts WHERE turn_id=? ORDER BY step,position", (turn_id,))]
+
+        rows = client.portal.call(receipts)
+        close = next(row for row in rows if row["call_id"] == "close-call")
+        skipped = next(row for row in rows if row["call_id"] == "after-close-side-effect")
+        assert json.loads(close["result"])["ok"] is True
+        if replay:
+            assert json.loads(close["result"])["result"] == closed.json()
+        assert json.loads(skipped["result"])["ok"] is False
+        messages, tools = model.confirmation
+        assert tools == []
+        assert messages[-1]["tool_call_id"] == "close-call"
+        assert json.loads(messages[-1]["content"]) == json.loads(close["result"])
+        assert lifecycle(client, base, token, first)["goal"]["status"] == "completed"
+        snapshot = client.get(f"{base}/snapshot", headers=auth(OPERATOR)).json()
+        assert all(m["text"] != "SIDE_EFFECT_MUST_NOT_EXIST" for m in snapshot["messages"])
+        inbox = client.get(f"{base}/deliveries", headers=auth(token)).json()
+        assert [item["message_id"] for item in inbox if item["purpose"] == "goal.terminal"] == [
+            json.loads(close["result"])["result"]["notification_message_id"],
+        ]

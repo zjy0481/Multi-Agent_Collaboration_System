@@ -439,7 +439,7 @@ class Runtime:
                 self._complete_tool(turn, step, position, name, call_id, result, "tool.skipped")
                 return result, pause
         try:
-            close_call = CloseGoalCall(turn, step, position, call_id) if scheduled and name == "close_goal" else None
+            close_call = CloseGoalCall(turn, step, position, call_id) if name == "close_goal" else None
             result = await self._execute_tool(role, turn, call_id, name, arguments, workspace_id, scheduled,
                                               close_call=close_call)
         except (WorkspaceNotFound, asyncio.CancelledError):

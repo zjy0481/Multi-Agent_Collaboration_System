@@ -797,6 +797,20 @@ class GoalLifecycle:
             except (ArtifactError, ArtifactNotFound) as exc:
                 raise TeamNotFound("Final version is not readable") from exc
 
+    def _can_confirm_close(self, actor, close_call, scope):
+        if close_call is None:
+            return False
+        caller = self.db.execute("""
+            SELECT s.turn_id AS scheduled_turn_id, d.message_id
+            FROM turns t LEFT JOIN scheduled_turns s ON s.turn_id = t.id
+            LEFT JOIN message_deliveries d ON (d.event_id, d.session_id, d.purpose) =
+                (s.event_id, s.session_id, s.purpose) AND d.status = 'running' AND d.session_id = t.role
+            WHERE t.id = ? AND t.role = ? AND t.status = 'running'
+        """, (close_call.turn.id, actor.session_id)).fetchone()
+        # A scheduled turn tied to other work can continue within its own scope.
+        return caller is not None and (caller["scheduled_turn_id"] is None
+                                       or caller["message_id"] in scope["message_ids"])
+
     def terminate_goal(self, team_id, actor, goal_id, body: TerminalInput, *, close_call=None):
         key = (team_id, actor.id, "terminate_goal", body.request_id)
         payload = body.model_dump(exclude={"request_id"})
@@ -809,6 +823,10 @@ class GoalLifecycle:
             self._check_terminal_permission(team, actor, body.outcome)
             replay = self.collaboration._replay(key, digest)
             if replay is not None:
+                if close_call is not None:
+                    scope = self._scope_objects(team_id, goal_id, goal["source_message_id"])
+                    if self._can_confirm_close(actor, close_call, scope):
+                        self.runtime.record_goal_close(close_call, replay)
                 return replay
             if goal["status"] not in {"active", "queued"}:
                 raise TeamConflict("Goal is already terminal")
@@ -832,17 +850,10 @@ class GoalLifecycle:
                     )
                 except (ArtifactError, ArtifactNotFound) as exc:
                     raise TeamNotFound("Final version is not readable") from exc
-            if close_call is not None:
-                delivery = self.db.execute("""
-                    SELECT d.message_id FROM scheduled_turns s JOIN message_deliveries d
-                    USING (event_id, session_id, purpose) JOIN turns t ON t.id = s.turn_id
-                    WHERE s.turn_id = ? AND s.session_id = ? AND d.status = 'running' AND t.status = 'running'
-                """, (close_call.turn.id, actor.session_id)).fetchone()
-                if delivery is None or delivery["message_id"] not in scope["message_ids"]:
-                    close_call = None
+            confirm_close = self._can_confirm_close(actor, close_call, scope)
             active_tasks = self._close_scope(
                 team_id, actor.id, goal_id, goal["source_message_id"], scope,
-                confirming_turn_id=close_call.turn.id if close_call else None,
+                confirming_turn_id=close_call.turn.id if confirm_close else None,
             )
             self.db.execute("UPDATE team_goals SET status = ? WHERE id = ?", (body.outcome, goal_id))
             event_id = self.collaboration._event(team_id, f"goal.{body.outcome}", goal_id)
@@ -861,7 +872,7 @@ class GoalLifecycle:
                                     server_time, frozen, message_id, event_id, actor.id,
                                     "lead" if body.outcome in {"completed", "failed"} else "user")
             self.collaboration._save_receipt(key, digest, receipt)
-            if close_call is not None:
+            if confirm_close:
                 self.runtime.record_goal_close(close_call, receipt)
         for active in active_tasks:
             if active is not None:
