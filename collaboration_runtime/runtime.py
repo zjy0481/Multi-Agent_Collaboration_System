@@ -78,7 +78,7 @@ class UnknownToolOutcome(Exception):
 # These tools either only read or enforce their own stable business request key.
 REPLAYABLE_TOOLS = {
     "ask_human", "get_message", "list_participants", "register_goal", "send_message",
-    "list_artifacts", "list_workspace_readers", "read_artifact", "read_file", "get_search_result",
+    "list_artifacts", "list_workspace_readers", "read_artifact", "read_file", "get_search_result", "get_source",
     "get_git_action", "request_push",
     "fork_session", "send_fork_message", "decide_fork_result",
     "get_goal", "update_goal_acceptance", "close_goal", "activate_goal",
@@ -94,6 +94,10 @@ DELIVERY_PROMPT = (
     "all required parties have confirmed. Acknowledge once when needed; use current task state instead "
     "of echoing confirmations or status messages. On an assigned, ready, or returned task, produce the deliverable, "
     "verify it, publish exact versions to the appropriate readers, and submit_result. "
+    "For research, run a few focused searches, then read relevant primary sources and start the draft. "
+    "Use durable source IDs or cite the actual source and passage you read. Search titles and snippets alone "
+    "are leads. Mark claims awaiting evidence, and change approach or report a blocker if further searches "
+    "produce no useful evidence or the provider reports degradation. "
     "When review_request is present, complete the review_result action using evidence for each criterion. "
     "The Lead records the required task deliveries in the goal acceptance and uses close_goal with the "
     "accepted versions when the goal is complete. For earlier assignments, use explicitly shared "

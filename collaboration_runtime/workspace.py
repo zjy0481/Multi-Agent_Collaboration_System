@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import Annotated
@@ -12,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 from .artifacts import ArtifactError, ArtifactNotFound, ArtifactStore
 from .sandbox import SandboxError
 from .search import SearchError
+from .source_fetch import fetch_public_source
 
 
 class WorkspaceNotFound(Exception):
@@ -78,6 +80,14 @@ class SearchResultArgs(ToolArgs):
     search_id: Identifier
 
 
+class SourceArgs(SearchResultArgs):
+    url: Text
+
+
+class SourceRecordArgs(ToolArgs):
+    source_id: Identifier
+
+
 TOOLS = {
     "read_file": (PathArgs, "Read a UTF-8 file from your private workspace."),
     "create_file": (WriteArgs, "Create a UTF-8 file in your private workspace."),
@@ -90,6 +100,8 @@ TOOLS = {
     "read_artifact": (ReadArtifactArgs, "Read an authorized version as UTF-8 and get its read-only mount path."),
     "search_web": (SearchArgs, "Search the host-configured retrieval source and record URLs and excerpts."),
     "get_search_result": (SearchResultArgs, "Retrieve a search record made by this execution session."),
+    "read_source": (SourceArgs, "Read the public HTTPS text of an exact URL in your own search result and record evidence."),
+    "get_source": (SourceRecordArgs, "Retrieve your recorded source text and provenance."),
 }
 
 
@@ -116,7 +128,13 @@ class WorkspaceService:
                 query TEXT NOT NULL,
                 results TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS workspace_sources (
+                source_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, session_id TEXT NOT NULL,
+                scope_id TEXT, data TEXT NOT NULL
+            );
         """)
+        if 'upstream_status' not in {row['name'] for row in self.db.execute('PRAGMA table_info(workspace_searches)')}:
+            self.db.execute("ALTER TABLE workspace_searches ADD COLUMN upstream_status TEXT NOT NULL DEFAULT 'ok'")
 
     def _member_actor(self, session_id: str) -> Actor | None:
         member = self.teams.session(session_id)
@@ -309,7 +327,25 @@ class WorkspaceService:
             return {**self._artifact_view(metadata), "content": path.read_text(encoding="utf-8")}
         if name == "search_web":
             return await self._search(actor, args.query, args.limit)
-        return self._search_record(actor, args.search_id)
+        if name == "get_search_result":
+            return self._search_record(actor, args.search_id)
+        if name == "read_source":
+            search = self._search_record(actor, args.search_id)
+            if args.url not in [item['url'] for item in search['results']]:
+                raise WorkspaceNotFound('URL not found in this search record')
+            result = await asyncio.to_thread(fetch_public_source, args.url)
+            self.actor(actor.session_id)
+            result.update(source_id=uuid4().hex, search_id=args.search_id,
+                          retrieved_at=datetime.now(timezone.utc).isoformat())
+            with self.db:
+                self.db.execute('INSERT INTO workspace_sources VALUES (?, ?, ?, ?, ?)',
+                    (result['source_id'], actor.team_id, actor.session_id, actor.scope_id, json.dumps(result, ensure_ascii=False)))
+            return result
+        row = self.db.execute('SELECT data FROM workspace_sources WHERE source_id = ? AND team_id = ? AND session_id = ? AND scope_id IS ?',
+                              (args.source_id, actor.team_id, actor.session_id, actor.scope_id)).fetchone()
+        if row is None:
+            raise WorkspaceNotFound('Source record not found')
+        return json.loads(row['data'])
 
     async def _search(self, actor: Actor, query: str, limit: int):
         if self.search is None:
@@ -319,17 +355,20 @@ class WorkspaceService:
         search_id = uuid4().hex
         with self.db:
             self.db.execute(
-                "INSERT INTO workspace_searches VALUES (?, ?, ?, ?, ?, ?)",
-                (search_id, actor.team_id, actor.session_id, actor.scope_id, query, json.dumps(results, ensure_ascii=False)),
+                "INSERT INTO workspace_searches (search_id, team_id, session_id, scope_id, query, results, upstream_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (search_id, actor.team_id, actor.session_id, actor.scope_id, query, json.dumps(results, ensure_ascii=False),
+                 'degraded' if getattr(results, 'degraded', False) else 'ok'),
             )
-        return {"search_id": search_id, "query": query, "results": results}
+        return {"search_id": search_id, "query": query, "results": list(results),
+                "upstream_status": "degraded" if getattr(results, "degraded", False) else "ok"}
 
     def _search_record(self, actor: Actor, search_id: str):
         row = self.db.execute(
-            """SELECT query, results FROM workspace_searches
+            """SELECT query, results, upstream_status FROM workspace_searches
                WHERE search_id = ? AND team_id = ? AND session_id = ? AND scope_id IS ?""",
             (search_id, actor.team_id, actor.session_id, actor.scope_id),
         ).fetchone()
         if row is None:
             raise WorkspaceNotFound("Search record not found")
-        return {"search_id": search_id, "query": row["query"], "results": json.loads(row["results"])}
+        return {"search_id": search_id, "query": row["query"], "results": json.loads(row["results"]),
+                "upstream_status": row["upstream_status"]}
