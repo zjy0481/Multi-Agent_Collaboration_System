@@ -570,6 +570,66 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return {"turn_id": turn_id, "status": "running"}
 
+    @app.post("/v1/sessions/{role}/turns/{turn_id}/retry", status_code=202,
+              dependencies=[Depends(_require_operator)])
+    async def retry_model_turn(role: str, turn_id: str):
+        runtime = app.state.runtime
+        db = runtime.db
+        with db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("""
+                SELECT t.status, t.error, d.status AS delivery_status, d.message_id, m.team_id
+                FROM turns t JOIN scheduled_turns s ON s.turn_id = t.id
+                JOIN message_deliveries d USING (event_id, session_id, purpose)
+                JOIN team_messages m ON m.id = d.message_id
+                WHERE t.id = ? AND t.role = ?
+            """, (turn_id, role)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail="Scheduled turn not found")
+            if row['status'] in ('recoverable', 'running', 'completed'):
+                prior = db.execute("SELECT 1 FROM events WHERE turn_id = ? AND type = 'model.retry_requested'",
+                                   (turn_id,)).fetchone()
+                if prior:
+                    return {"turn_id": turn_id, "status": row['status']}
+            if row['status'] != 'failed' or row['delivery_status'] != 'failed':
+                raise HTTPException(status_code=409, detail="Turn cannot be retried in its current state")
+            checkpoint = runtime.journal.checkpoint(turn_id)
+            step_limited = row['error'] == 'Turn exceeded its model step limit'
+            failure = db.execute("SELECT payload FROM events WHERE turn_id = ? AND type = ? ORDER BY rowid DESC LIMIT 1",
+                                 (turn_id, 'model.step_limit' if step_limited else 'model.failed')).fetchone()
+            if failure is None or (not step_limited and not json.loads(failure['payload']).get('transient')):
+                raise HTTPException(status_code=409, detail="Turn has no retryable model failure")
+            if checkpoint is None or json.loads(failure['payload']).get('generation') != checkpoint['generation']:
+                raise HTTPException(status_code=409, detail="Latest failure belongs to an earlier turn generation")
+            extra_steps = 0
+            if step_limited:
+                granted = db.execute("""SELECT COALESCE(SUM(CAST(json_extract(payload, '$.extra_steps') AS INTEGER)), 0)
+                                        FROM events WHERE turn_id = ? AND type = 'model.retry_requested'""",
+                                     (turn_id,)).fetchone()[0]
+                if granted >= runtime.max_steps * 4:
+                    raise HTTPException(status_code=409, detail="Turn reached its total model step budget")
+                extra_steps = runtime.max_steps
+            other = db.execute("SELECT 1 FROM turns WHERE role = ? AND id != ? AND status = 'recoverable'",
+                               (role, turn_id)).fetchone()
+            if other is not None:
+                raise HTTPException(status_code=409, detail="Another turn for this role is awaiting recovery")
+            if not runtime.journal.confirming_goal(turn_id):
+                terminal = db.execute("SELECT goal_id, source_message_id FROM goal_terminal_facts WHERE team_id = ?",
+                                      (row['team_id'],)).fetchall()
+                for goal in terminal:
+                    scope = app.state.goal_lifecycle._scope_objects(row['team_id'], goal['goal_id'],
+                                                                    goal['source_message_id'])
+                    if row['message_id'] in scope['message_ids']:
+                        raise HTTPException(status_code=409, detail="Goal has ended")
+            db.execute("UPDATE turns SET status = 'recoverable', error = NULL WHERE id = ?", (turn_id,))
+            db.execute("""
+                UPDATE message_deliveries SET status = 'running'
+                WHERE (event_id, session_id, purpose) IN (
+                    SELECT event_id, session_id, purpose FROM scheduled_turns WHERE turn_id = ?)
+            """, (turn_id,))
+            runtime._event(turn_id, 'model.retry_requested', extra_steps=extra_steps)
+        return {"turn_id": turn_id, "status": "recoverable"}
+
     @app.post("/v1/sessions/{role}/turns/{turn_id}/steer", status_code=202)
     async def steer_turn(role: str, turn_id: str, body: TurnInput, caller: Identity):
         _check_execution_identity(caller, role)

@@ -36,6 +36,7 @@ class MessageInput(Command):
     recipient_id: ObjectId | None = None
     mentions: list[ObjectId] = Field(default_factory=list, max_length=100)
     reply_to: ObjectId | None = None
+    goal_id: ObjectId | None = None
     kind: Literal["chat", "progress", "assignment", "supplement"] = "chat"
 
 
@@ -129,6 +130,10 @@ class CollaborationService:
             );
             CREATE UNIQUE INDEX IF NOT EXISTS one_active_goal ON team_goals(team_id) WHERE status = 'active';
             CREATE INDEX IF NOT EXISTS team_goals_order ON team_goals(team_id, seq);
+            CREATE TABLE IF NOT EXISTS message_goal_scopes (
+                message_id TEXT PRIMARY KEY REFERENCES team_messages(id),
+                goal_id TEXT NOT NULL REFERENCES team_goals(id)
+            );
             CREATE TABLE IF NOT EXISTS message_deliveries (
                 event_id INTEGER NOT NULL REFERENCES collaboration_events(seq),
                 message_id TEXT NOT NULL REFERENCES team_messages(id),
@@ -342,7 +347,10 @@ class CollaborationService:
     def send_message(self, team_id, actor, body: MessageInput):
         key = (team_id, actor.id, "send_message", body.request_id)
         mentions = sorted(set(body.mentions))
-        digest = self._digest({**body.model_dump(exclude={"request_id"}), "mentions": mentions})
+        digest_body = body.model_dump(exclude={"request_id"})
+        if body.goal_id is None:
+            digest_body.pop("goal_id")
+        digest = self._digest({**digest_body, "mentions": mentions})
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             team = self.team(team_id, actor)
@@ -354,6 +362,21 @@ class CollaborationService:
             members = {member["member_id"]: member["session_id"] for member in team["members"]}
             recipient = body.recipient_id
             source = self._message_for(team_id, actor, body.reply_to) if body.reply_to else None
+            if body.goal_id is not None:
+                scoped_goal = self.db.execute(
+                    "SELECT source_message_id, status FROM team_goals WHERE id = ? AND team_id = ?",
+                    (body.goal_id, team_id),
+                ).fetchone()
+                if scoped_goal is None:
+                    raise TeamNotFound("Goal not found")
+                self._message_for(team_id, actor, scoped_goal["source_message_id"])
+                if scoped_goal["status"] not in {"active", "queued"}:
+                    raise TeamConflict("Goal is no longer active")
+                if body.kind == "assignment":
+                    raise CollaborationInvalid("An original assignment cannot reference a goal")
+                source_goal = self.goal_for_message(team_id, source["id"]) if source else None
+                if source_goal is not None and source_goal != body.goal_id:
+                    raise CollaborationInvalid("The reply and message goal must refer to the same goal")
             question = decision = None
             if source and actor.is_operator:
                 question = self.db.execute("SELECT * FROM human_questions WHERE question_id = ?",
@@ -395,6 +418,9 @@ class CollaborationService:
 
             receipt = self._create_message(team_id, actor, recipient=recipient, text=body.text,
                                            kind=body.kind, mentions=mentions, reply_to=body.reply_to)
+            if body.goal_id is not None:
+                self.db.execute("INSERT INTO message_goal_scopes VALUES (?, ?)",
+                                (receipt["message_id"], body.goal_id))
             if question is not None:
                 self._answer_question(team_id, question, receipt)
             elif decision is not None:
@@ -464,6 +490,9 @@ class CollaborationService:
         message = self.get_message(actor.team_id, actor, delivery["message_id"])
         self._add_delivery_answers(delivery)
         payload = {"delivery": delivery, "message": message}
+        goal_id = self.goal_for_message(actor.team_id, message["id"])
+        if goal_id is not None:
+            payload["goal_id"] = goal_id
         if delivery["purpose"] == "clarification.resume":
             payload["source_message"] = self.get_message(actor.team_id, actor, delivery["source_message_id"])
             payload["answers"] = [self.get_message(actor.team_id, actor, answer_id)
@@ -473,6 +502,22 @@ class CollaborationService:
             if context is not None:
                 payload.update(context)
         return payload
+
+    def goal_for_message(self, team_id, message_id):
+        """Resolve persisted goal scope, including assignment and delegation threads."""
+        goal_id, _ = self.goal_scope_for_message(team_id, message_id)
+        return goal_id
+
+    def goal_scope_for_message(self, team_id, message_id):
+        if self.goal_lifecycle is None:
+            return None, None
+        for goal in self.db.execute(
+            "SELECT id, source_message_id FROM team_goals WHERE team_id = ? ORDER BY seq", (team_id,),
+        ):
+            scope = self.goal_lifecycle._scope_objects(team_id, goal["id"], goal["source_message_id"])
+            if message_id in scope["message_ids"]:
+                return goal["id"], set(scope["message_ids"])
+        return None, None
 
     def register_goal(self, team_id, actor, body: GoalInput):
         key = (team_id, actor.id, "register_goal", body.request_id)
@@ -644,6 +689,12 @@ class CollaborationService:
         try:
             args = TOOLS[name][0].model_validate_json(raw_arguments)
             if name == "send_message":
+                if work_message_id is not None and self.goal_lifecycle is not None:
+                    goal_id = self.goal_for_message(actor.team_id, work_message_id)
+                    if goal_id is not None:
+                        if args.goal_id is not None and args.goal_id != goal_id:
+                            raise CollaborationInvalid("The message goal must match the current work")
+                        args = args.model_copy(update={"goal_id": goal_id})
                 result = self.send_message(actor.team_id, actor, args)
             elif name == "register_goal":
                 result = self.register_goal(actor.team_id, actor, args)
@@ -670,7 +721,7 @@ class CollaborationService:
 TOOLS = {
     "list_participants": (Command, "List the participant IDs and names in your team."),
     "get_message": (ReadMessageInput, "Read a visible message by ID."),
-    "send_message": (MessageInput, "Send a group or bilateral team message. Supply a unique request ID."),
+    "send_message": (MessageInput, "Send a group or bilateral team message. Supply a unique request ID and goal_id for goal-related messages."),
     "register_goal": (GoalInput, "As Lead, register the user's original assignment by message ID."),
     "ask_human": (QuestionInput, "Ask the user a blocking question about a message delivered to your session. "
                   "Pass its message ID. This pauses the turn until a quoted reply makes that work ready again."),

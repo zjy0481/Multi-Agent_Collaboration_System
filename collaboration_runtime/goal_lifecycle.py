@@ -572,6 +572,9 @@ class GoalLifecycle:
             ]
         message_ids = list(dict.fromkeys([
             source_message_id,
+            *[row["message_id"] for row in self.db.execute(
+                "SELECT message_id FROM message_goal_scopes WHERE goal_id = ?", (goal_id,)
+            )],
             *notification_messages,
             *[question["question_id"] for question in questions],
             *[question["source_message_id"] for question in questions],

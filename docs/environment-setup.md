@@ -40,6 +40,8 @@ COURSE_API_KEY=
 
 离线调试可显式设置 `COLLABORATION_MODEL_MODE=mock`。运行下文的真实模型联调时使用 `course`，并为测试保留课程模型额度。
 
+课程模型请求的临时错误会自动重试。耗尽重试或达到回合步数上限后，本机操作者可以调用 `POST /v1/sessions/{session_id}/turns/{turn_id}/retry` 从检查点继续。每次续跑的步数有限，成功的工具回执会保留。
+
 ## WSL 2 与 Docker
 
 在开启硬件虚拟化的 Windows 上，以管理员身份安装 WSL。安装完成后按系统提示重启。Docker Desktop 可在 Windows PowerShell 使用其 Linux Engine，安装时可跳过单独的 Linux 发行版。 [Microsoft WSL 命令](https://learn.microsoft.com/zh-cn/windows/wsl/basic-commands) · [Docker Desktop 的 WSL 2 后端](https://docs.docker.com/desktop/features/wsl/)
@@ -70,6 +72,8 @@ Remove-Item Env:RUN_DOCKER_TESTS
 ## 联网搜索与代理
 
 检索由 Windows 上的工作台宿主发起。宿主请求 `127.0.0.1:8888` 上的 SearXNG，SearXNG 再通过 `host.docker.internal:7897` 访问宿主的 HTTP 代理和上游搜索引擎。成员的执行容器继续使用 `--network none`。Docker Desktop 提供 `host.docker.internal`，供容器访问宿主服务。 [Docker Desktop 网络说明](https://docs.docker.com/desktop/features/networking/networking-how-tos/) · [沙箱实现](../collaboration_runtime/sandbox.py)
+
+检索结果包含上游状态。`read_source` 读取当前会话搜索记录中的精确公网 HTTPS 链接，记录获取时间和内容摘要，`get_source` 可读取证据。正文读取由宿主直接解析域名并发起 HTTPS 连接，支持 HTML 和纯文本，当前不跟随重定向。
 
 ### 验证 Windows 代理
 

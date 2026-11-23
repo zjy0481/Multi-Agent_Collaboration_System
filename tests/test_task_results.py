@@ -184,3 +184,54 @@ def test_model_tools_and_conflicting_review_survive_restart(tmp_path):
         assert approved['ok'], approved
         (tmp_path / 'team-artifacts' / artifact['version_id'] / 'artifact').write_bytes(b'damaged')
         assert recovered.portal.call(current_acceptance, recovered, base, reviewer, goal, task_id) is None
+
+
+def test_review_delivery_contains_readable_pinned_submission_and_criteria(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens, goal = context(client)
+        owner, reviewer = others[:2]
+        task_id = register(client, base, lead['member_id'], tokens, goal,
+                           terms(owner['member_id'], reviewer['member_id']))
+        endpoint = f'{base}/tasks/{task_id}'
+        version = publish(client, base, owner, [reviewer], b'review evidence')
+        result = ok(submit(client, endpoint, tokens[owner['member_id']], submission(version)))
+        state = client.app.state
+        reviewer_actor = client.portal.call(state.auth.member, reviewer['session_id'])
+        owner_actor = client.portal.call(state.auth.member, owner['session_id'])
+
+        def contexts():
+            return [state.delegation.execution_context(message_id, reviewer_actor)
+                    for message_id in result['notification_message_ids']]
+
+        contexts_for_reviewer = client.portal.call(contexts)
+        review_context = next(item for item in contexts_for_reviewer if item and 'review_request' in item)
+        assert review_context['review_request']['submission']['id'] == result['submission_id']
+        assert review_context['review_request']['submission']['versions'][0]['version_id'] == version['version_id']
+        assert review_context['task']['terms']['acceptance_criteria']
+        assert 'review_result' in review_context['review_request']['instruction']
+        assert all('review_request' not in (client.portal.call(state.delegation.execution_context, message_id, owner_actor) or {})
+                   for message_id in result['notification_message_ids'])
+
+        ok(review(client, endpoint, tokens[reviewer['member_id']], result['submission_id'], decision()))
+        assert all('review_request' not in (item or {}) for item in client.portal.call(contexts))
+
+
+def test_old_revision_submission_does_not_request_review_after_revision(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens, goal = context(client)
+        owner, reviewer = others[:2]
+        lead_id, owner_id, reviewer_id = [member['member_id'] for member in (lead, owner, reviewer)]
+        task_id = register(client, base, lead_id, tokens, goal, terms(owner_id, reviewer_id))
+        version = publish(client, base, owner, [reviewer], b'old result')
+        result = ok(submit(client, f'{base}/tasks/{task_id}', tokens[owner_id], submission(version)))
+        state = client.app.state
+        actor = client.portal.call(state.auth.member, reviewer['session_id'])
+
+        def review_contexts():
+            return [state.delegation.execution_context(message_id, actor)
+                    for message_id in result['notification_message_ids']]
+
+        assert any('review_request' in (item or {}) for item in client.portal.call(review_contexts))
+        register(client, base, lead_id, tokens, goal, terms(owner_id, reviewer_id),
+                 task_id=task_id, base_revision=1)
+        assert all('review_request' not in (item or {}) for item in client.portal.call(review_contexts))

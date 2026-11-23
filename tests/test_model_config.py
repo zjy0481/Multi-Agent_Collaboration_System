@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
-from collaboration_runtime.model import CourseModel, ModelError, load_model
+from collaboration_runtime.model import CourseModel, ModelError, OpenCodeModel, load_model
 from test_runtime import wait_for_terminal
 from test_teams import sample
 
@@ -24,6 +24,31 @@ def clear_course_environment(monkeypatch):
 class RecordingModel(CourseModel):
     def __init__(self, base_url, model, api_key, **kwargs):
         self.values = (base_url, model, api_key)
+
+
+def test_opencode_retry_preserves_session_and_payload():
+    async def check():
+        requests = []
+
+        def respond(request):
+            requests.append((request.headers.get('x-opencode-session'), json.loads(request.content)))
+            if len(requests) == 1:
+                return httpx.Response(503)
+            return httpx.Response(200, json={'choices': [{'message': {'role': 'assistant', 'content': 'ok'}}]})
+
+        model = OpenCodeModel('https://example.invalid', 'deepseek-test', 'test-key')
+        await model._client.aclose()
+        model._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        try:
+            reply = await model.complete_for_session([{'role': 'user', 'content': 'hello'}], [], session_id='test-session')
+            assert reply['content'] == 'ok'
+            assert len(requests) == 2
+            assert requests[0] == requests[1]
+            assert requests[0][0].startswith('ses_')
+            assert requests[0][1]['thinking'] == {'type': 'disabled'}
+        finally:
+            await model.aclose()
+    asyncio.run(check())
 
 
 def test_dotenv_bom_literal_values_and_no_environment_mutation(tmp_path, monkeypatch):

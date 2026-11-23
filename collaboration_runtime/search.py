@@ -16,6 +16,12 @@ class SearchError(Exception):
     """A safe, credential-free search configuration or transport error."""
 
 
+class SearchResults(list):
+    def __init__(self, items, degraded=False):
+        super().__init__(items)
+        self.degraded = degraded
+
+
 def _valid_url(url: str, *, endpoint: bool) -> bool:
     try:
         parts = urlsplit(url)
@@ -96,7 +102,7 @@ class SearchClient:
             results.append(result)
             if len(results) == limit:
                 break
-        return results
+        return SearchResults(results, bool(data.get("unresponsive_engines")))
 
     async def aclose(self) -> None:
         await self._client.aclose()

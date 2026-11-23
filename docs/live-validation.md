@@ -8,7 +8,7 @@
 
 ## T006 持久调度
 
-使用相同的课程模型和沙箱替身。模型先调用 `list_participants`，再使用返回的成员 ID 调用 `send_message` 向群聊发出进展。两次回执保留原调用 ID，回合状态为 `completed`。真实容器隔离见 [T005 验收记录](t005-validation.md)。
+使用相同的课程模型和沙箱替身。模型先调用 `list_participants`，再使用返回的成员 ID 调用 `send_message` 向群聊发出进展。两次回执保留原调用 ID，回合状态为 `completed`。真实容器隔离见 [T005 验收记录](validation/t005-validation.md)。
 
 ## T013 真实端点与检索
 

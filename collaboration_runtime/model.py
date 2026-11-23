@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -22,10 +24,15 @@ PROVIDER_SETTINGS = {
     "opencode": ("https://opencode.ai/inference/go/openai/v1", "deepseek-v4.1-flash", "OPENCODE_API_KEY"),
 }
 PROVIDER_LABELS = {"course": "Course API", "deepseek": "DeepSeek API", "opencode": "OpenCode Go API"}
+logger = logging.getLogger(__name__)
 
 
 class ModelError(Exception):
     """A model configuration, transport, or response error without secrets."""
+
+
+class ModelUnavailable(ModelError):
+    """A transient provider failure after the request retry limit."""
 
 
 def _endpoint(base_url: str) -> str:
@@ -127,14 +134,26 @@ class ChatCompletionsModel:
             payload["tools"] = tools
         if self._disable_thinking:
             payload["thinking"] = {"type": "disabled"}
-        try:
-            response = await self._client.post(self._url, json=payload, headers=headers)
-        except httpx.TimeoutException:
-            raise ModelError(f"{self._label} request timed out") from None
-        except (httpx.RequestError, ValueError, TypeError):
-            raise ModelError(f"{self._label} request failed") from None
-        if not 200 <= response.status_code < 300:
-            raise ModelError(f"{self._label} returned HTTP {response.status_code}")
+        for attempt in range(3):
+            try:
+                response = await self._client.post(self._url, json=payload, headers=headers)
+                if 200 <= response.status_code < 300:
+                    break
+                error = f"{self._label} returned HTTP {response.status_code}"
+                retryable = response.status_code in (408, 429, 500, 502, 503, 504)
+            except httpx.TimeoutException:
+                error = f"{self._label} request timed out"
+                retryable = True
+            except httpx.RequestError:
+                error = f"{self._label} request failed"
+                retryable = True
+            except (ValueError, TypeError):
+                raise ModelError(f"{self._label} request failed") from None
+            if not retryable or attempt == 2:
+                raise (ModelUnavailable(error) if retryable else ModelError(error)) from None
+            delay = 0.5 * (2 ** attempt)
+            logger.warning("Course model request retry %s after %s; waiting %.1f seconds", attempt + 1, error, delay)
+            await asyncio.sleep(delay)
         try:
             data = response.json()
             message = data["choices"][0]["message"]

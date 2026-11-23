@@ -246,7 +246,20 @@ class DelegationService:
         if event_type.startswith("proposal."):
             current = self._visible_proposal(actor.team_id, actor, record["id"], record["version"])
             return {"proposal": self._view(current)}
-        return {"task": self._view(record), **self.results.event_reference(actor, record)}
+        context = {"task": self._view(record), **self.results.event_reference(actor, record)}
+        if event_type == "task.submitted" and actor.id == record["terms"]["reviewer_id"]:
+            reference = context.get("result_reference")
+            current = self._task(actor.team_id, record["id"])
+            if reference is not None and current["revision"] == record["revision"]:
+                submission = self.results._latest(record["id"], record["revision"])
+                if submission is not None and submission["id"] == reference["submission_id"] and submission["review"] is None:
+                    context["review_request"] = {
+                        "submission": submission,
+                        "instruction": "Read the submitted versions and review every acceptance criterion. "
+                                       "Call review_result with the task ID, submission ID, task revision, "
+                                       "and one evidence-backed finding per criterion.",
+                    }
+        return context
 
     def _emit(self, team_id, event_type, record):
         seq = self.collaboration._event(team_id, event_type, record["id"])
