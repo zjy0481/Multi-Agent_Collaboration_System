@@ -89,11 +89,14 @@ class TaskResults:
         """, (task["goal_id"], task["team_id"], task["id"]))
         return sorted(pinned.intersection(row["version_id"] for row in rows))
 
-    @staticmethod
-    def _status(task, latest, stale):
+    def _status(self, task, latest, stale):
         if stale:
             return "needs_recheck"
         if latest is None:
+            if task["terms"]["dependency_ids"]:
+                satisfied = all(self.current_acceptance_fact(task["team_id"], task["goal_id"], dependency)
+                                for dependency in task["terms"]["dependency_ids"])
+                return "ready" if satisfied else "waiting_dependencies"
             return task["status"]
         if latest["review"] is None:
             return "pending_review"
@@ -289,6 +292,23 @@ class TaskResults:
         self.db.execute("INSERT INTO task_reviews VALUES (?, ?)", (submission_id, json.dumps(record)))
         notifications = self._notify(task, actor, members, (task["terms"]["owner_id"], lead, task["dispatcher_id"]),
                                      event_id, kind, "任务审查通过" if approved else "任务审查退回")
+        if approved:
+            rows = self.db.execute("SELECT id FROM delegation_tasks WHERE team_id = ? AND goal_id = ? AND id <> ?",
+                                   (task["team_id"], task["goal_id"], task["id"])).fetchall()
+            for row in rows:
+                downstream = self.delegation._task(task["team_id"], row["id"])
+                if (task["id"] not in downstream["terms"]["dependency_ids"]
+                        or self._latest(downstream["id"], downstream["revision"]) is not None
+                        or self.status(downstream) != "ready"):
+                    continue
+                owner = members[downstream["terms"]["owner_id"]]
+                try:
+                    for version_id in downstream["terms"]["input_version_ids"]:
+                        self.artifacts.resolve(task["team_id"], owner.session_id, version_id)
+                except ArtifactError:
+                    continue
+                ready_event = self._event(downstream, "ready", "task.ready")
+                self._notify(downstream, actor, members, [owner.id], ready_event, "task.ready", "前置任务已通过，任务可以继续")
         return {"submission_id": submission_id, "review_id": record["id"], "event_id": event_id,
                 "notification_message_ids": notifications}
 
