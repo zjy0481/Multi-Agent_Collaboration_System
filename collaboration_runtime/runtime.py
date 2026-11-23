@@ -86,8 +86,18 @@ REPLAYABLE_TOOLS = {
 
 DELIVERY_PROMPT = (
     "\n\nThe host provides an authenticated delivery as JSON in the current input. "
-    "Read message.text as the incoming message. Use its actual message.id if ask_human needs "
-    "a source. A final reply is recorded in this session; use send_message for a team-visible update."
+    "Work on the current delivery and its goal_id. Use message.id as the source for ask_human. "
+    "On a new user assignment the Lead should register_goal with that message ID before delegating. "
+    "Agree on the smallest complete deliverable and shared acceptance checks. Start independent work "
+    "in parallel when the inputs allow it; state exact input versions, output names, and who reviews. "
+    "Confirm a proposal only when its current terms are clear. The proposer registers the task once "
+    "all required parties have confirmed. Acknowledge once when needed; use current task state instead "
+    "of echoing confirmations or status messages. On an assigned or returned task, produce the deliverable, "
+    "verify it, publish exact versions to the appropriate readers, and submit_result. "
+    "The Lead records the required task deliveries in the goal acceptance and uses close_goal with the "
+    "accepted versions when the goal is complete. For earlier assignments, use explicitly shared "
+    "artifacts or recorded experience. A final reply stays in this session. Use send_message for "
+    "a team-visible update when another member or the user needs to act."
 )
 
 
@@ -254,13 +264,16 @@ class Runtime:
             for row in rows
         ]
 
-    def _history(self, role: str) -> list[dict]:
-        rows = self.db.execute(
-            "SELECT history FROM turns WHERE role = ? AND status IN ('completed', 'waiting_human', 'waiting_approval') "
-            "ORDER BY rowid",
-            (role,),
-        )
-        return [message for row in rows for message in json.loads(row["history"])]
+    def _history(self, role: str, message_ids: set[str] | None = None) -> list[dict]:
+        rows = self.db.execute("""
+            SELECT t.history, d.message_id FROM turns t
+            LEFT JOIN scheduled_turns s ON s.turn_id = t.id
+            LEFT JOIN message_deliveries d USING (event_id, session_id, purpose)
+            WHERE t.role = ? AND t.status IN ('completed', 'waiting_human', 'waiting_approval')
+            ORDER BY t.rowid
+        """, (role,))
+        return [message for row in rows if message_ids is None or row["message_id"] in message_ids
+                for message in json.loads(row["history"])]
 
     def _check_generation(self, turn):
         if not self.journal.current(turn.id, turn.generation):
@@ -302,6 +315,7 @@ class Runtime:
                 await self._confirm_goal_close(turn)
                 return
             instructions = prompt if prompt is not None else ROLES[role]
+            history_scope = None
             if scheduled:
                 instructions += DELIVERY_PROMPT
                 delivery = self.db.execute("""
@@ -309,6 +323,11 @@ class Runtime:
                     WHERE s.turn_id = ?
                 """, (turn.id,)).fetchone()
                 fork_message_id = self.collaboration.fork_message_for_delivery(delivery)
+                message = json.loads(checkpoint["history"][0]["content"])["message"]
+                actor = self.workspace_tools.actor(role)
+                _, history_scope = self.collaboration.goal_scope_for_message(actor.team_id, message["id"])
+                if history_scope is None and message["kind"] == "assignment":
+                    history_scope = {message["id"]}
             version_ids = check_scope()
             if is_fork:
                 instructions += (
@@ -318,7 +337,7 @@ class Runtime:
                 )
                 prior_history = self.forks.model_history(role, turn.id)
             else:
-                prior_history = self._history(role)
+                prior_history = self._history(role, history_scope)
             prior = [{"role": "system", "content": instructions}, *prior_history]
             current, step, phase = (checkpoint[key] for key in ("history", "step", "phase"))
             if version_ids is not None:

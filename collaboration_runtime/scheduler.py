@@ -48,7 +48,12 @@ class DeliveryScheduler:
                       AND live.status IN ('running', 'recoverable')
                       AND (s.turn_id IS NULL OR live.id != s.turn_id)
                   )
-                ORDER BY CASE WHEN t.status = 'recoverable' THEN 0 ELSE 1 END, d.event_id
+                ORDER BY CASE WHEN t.status = 'recoverable' THEN 0
+                              WHEN m.kind = 'assignment' THEN 1
+                              WHEN d.purpose = 'task.submitted' THEN 2
+                              WHEN d.purpose IN ('task.assigned', 'task.updated', 'task.ready', 'task.returned',
+                                                 'clarification.resume', 'clarification.correction') THEN 3
+                              ELSE 4 END, d.event_id
             ''').fetchall()
             for row in candidates:
                 delivery = dict(row)
