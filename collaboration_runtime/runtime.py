@@ -12,7 +12,7 @@ from .collaboration import CollaborationInvalid
 from .delegation_tools import TOOLS as DELEGATION_TOOLS
 from .experience import ExperienceTools
 from .journal import ExecutionJournal, GOAL_CONFIRMATION_PHASE
-from .model import ModelError
+from .model import ModelError, ModelUnavailable
 from .sandbox import SandboxError
 from .workspace import WorkspaceNotFound
 
@@ -344,7 +344,11 @@ class Runtime:
                 payload = json.loads(current[0]["content"])
                 self.fork_messages.add_delivery_versions(payload, fork_message_id, version_ids)
                 current[0]["content"] = json.dumps(payload, ensure_ascii=False)
-            while phase == "tools" or step < self.max_steps:
+            extra_steps = self.db.execute("""
+                SELECT COALESCE(SUM(CAST(json_extract(payload, '$.extra_steps') AS INTEGER)), 0)
+                FROM events WHERE turn_id = ? AND type = 'model.retry_requested'
+            """, (turn.id,)).fetchone()[0]
+            while phase == "tools" or step < self.max_steps + extra_steps:
                 self._check_generation(turn)
                 check_scope()
                 if phase == "tools":
@@ -405,7 +409,10 @@ class Runtime:
                             raise ModelError("Model returned no reply and no tool calls")
                         self._write_finish(turn.id, "completed", reply=reply, history=current)
                         return
-            self._finish(turn.id, "failed", error="Turn exceeded its model step limit")
+            with self.db:
+                if self.journal.current(turn.id, turn.generation):
+                    self._event(turn.id, "model.step_limit", generation=turn.generation, step=step)
+                    self._write_finish(turn.id, "failed", error="Turn exceeded its model step limit")
         except StaleTurn:
             return
         except UnknownToolOutcome as exc:
@@ -414,7 +421,8 @@ class Runtime:
         except ModelError as exc:
             with self.db:
                 if self.journal.current(turn.id, turn.generation):
-                    self._event(turn.id, "model.failed", generation=turn.generation, error=str(exc))
+                    self._event(turn.id, "model.failed", generation=turn.generation, error=str(exc),
+                                transient=isinstance(exc, ModelUnavailable))
                     self._write_finish(turn.id, "failed", error=str(exc))
         except (WorkspaceNotFound, CollaborationInvalid):
             if self.journal.current(turn.id, turn.generation):
