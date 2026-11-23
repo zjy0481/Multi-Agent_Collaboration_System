@@ -2,34 +2,22 @@
 
 from datetime import datetime
 
-from .collaboration import READABLE_MESSAGE
+from .collaboration import QUESTION_ASSIGNMENTS, READABLE_MESSAGE
 
 
 def project_human_waits(collaboration, team, actor, assignment_id, frozen_at):
     """Return question intervals from persisted messages and scope closure facts."""
-    # A threaded question follows its explicit assignment even when another goal
-    # held the active slot when the question was asked.
     rows = collaboration.db.execute(f"""
-        WITH RECURSIVE ancestry(question_id, message_id, reply_to, kind) AS (
-            SELECT q.question_id, source.id, source.reply_to, source.kind
-            FROM human_questions q JOIN team_messages source ON source.id = q.source_message_id
-            WHERE source.team_id = :team
-            UNION ALL
-            SELECT a.question_id, parent.id, parent.reply_to, parent.kind
-            FROM ancestry a JOIN team_messages parent ON parent.id = a.reply_to
-            WHERE a.kind <> 'assignment'
-        )
+        {QUESTION_ASSIGNMENTS}
         SELECT q.question_id, m.created_at AS started_at,
                answer.created_at AS answered_at, q.closed_at
-        FROM human_questions q
+        FROM question_assignments a JOIN human_questions q USING (question_id)
         JOIN team_messages m ON m.id = q.question_id
         LEFT JOIN team_messages answer ON answer.id = q.answer_message_id
-        LEFT JOIN team_goals g ON g.id = q.goal_id AND g.team_id = m.team_id
-        LEFT JOIN ancestry root ON root.question_id = q.question_id AND root.kind = 'assignment'
         WHERE m.team_id = :team AND {READABLE_MESSAGE}
-          AND COALESCE(root.message_id, g.source_message_id) = :assignment
+          AND a.assignment_id = :assignment
         ORDER BY m.seq
-    """, {"team": team["team_id"], "actor": actor.id, "assignment": assignment_id})
+    """, {"team": team["team_id"], "actor": actor.id, "question_id": None, "assignment": assignment_id})
     cutoff = datetime.fromisoformat(frozen_at) if frozen_at else None
     waits = []
     for row in rows:

@@ -58,6 +58,23 @@ class QuestionInput(Command):
 
 READABLE_MESSAGE = "(m.recipient_id IS NULL OR m.sender_id = :actor OR m.recipient_id = :actor)"
 QUESTION_FIELDS = "q.question_id, q.asker_id, q.source_message_id, q.answer_message_id"
+# An explicit assignment thread takes precedence over the active-goal fallback
+# stored when an agent asked the question.
+QUESTION_ASSIGNMENTS = """
+    WITH RECURSIVE question_sources(question_id, goal_id, message_id, reply_to, kind) AS (
+        SELECT q.question_id, q.goal_id, source.id, source.reply_to, source.kind
+        FROM human_questions q JOIN team_messages source ON source.id = q.source_message_id
+        WHERE source.team_id = :team AND (:question_id IS NULL OR q.question_id = :question_id)
+        UNION ALL
+        SELECT s.question_id, s.goal_id, parent.id, parent.reply_to, parent.kind
+        FROM question_sources s JOIN team_messages parent ON parent.id = s.reply_to
+        WHERE s.kind <> 'assignment' AND parent.team_id = :team
+    ), question_assignments(question_id, assignment_id) AS (
+        SELECT s.question_id, CASE WHEN s.kind = 'assignment' THEN s.message_id ELSE g.source_message_id END
+        FROM question_sources s LEFT JOIN team_goals g ON g.id = s.goal_id AND g.team_id = :team
+        WHERE s.kind = 'assignment' OR s.reply_to IS NULL
+    )
+"""
 CURSOR_WINDOW = 512
 EVENT_BATCH_SIZE = 100
 
@@ -280,13 +297,15 @@ class CollaborationService:
             SELECT 1 FROM human_questions WHERE question_id = ? AND answer_message_id IS NULL
         """, (question_id,)).fetchone() is not None
 
-    def _answer_question(self, question, answer):
+    def _answer_question(self, team_id, question, answer):
         if question["answer_message_id"] is not None:
             raise TeamConflict("This question already has an answer. Reference the answer to send a correction.")
         self.db.execute("UPDATE human_questions SET answer_message_id = ? WHERE question_id = ?",
                         (answer["message_id"], question["question_id"]))
         if question["closed_at"] is not None or (
-            self.goal_lifecycle is not None and self.goal_lifecycle.question_scope_ended(question)
+            self.goal_lifecycle is not None and self.goal_lifecycle.question_scope_ended(
+                team_id, question["question_id"],
+            )
         ):
             return
         work_key = (question["work_event_id"], question["session_id"], question["work_purpose"])
@@ -305,7 +324,9 @@ class CollaborationService:
         self.db.execute("INSERT INTO clarification_corrections VALUES (?, ?)",
                         (correction["message_id"], question["question_id"]))
         if question["closed_at"] is not None or (
-            self.goal_lifecycle is not None and self.goal_lifecycle.question_scope_ended(question)
+            self.goal_lifecycle is not None and self.goal_lifecycle.question_scope_ended(
+                source["team_id"], question["question_id"],
+            )
         ):
             return
         readers = self.db.execute("""
@@ -375,7 +396,7 @@ class CollaborationService:
             receipt = self._create_message(team_id, actor, recipient=recipient, text=body.text,
                                            kind=body.kind, mentions=mentions, reply_to=body.reply_to)
             if question is not None:
-                self._answer_question(question, receipt)
+                self._answer_question(team_id, question, receipt)
             elif decision is not None:
                 self._correct_answer(source, decision, receipt, members)
             else:
