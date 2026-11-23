@@ -87,6 +87,9 @@ def test_workspace_acl_assistant_versions_and_search(tmp_path):
         new = (await call(dev, 'publish_artifact', path='report.txt', reader_session_ids=[qa], artifact_id=old['artifact_id']))['result']
         assert (await call(qa, 'read_artifact', version_id=old['version_id']))['result']['content'] == 'old'
         assert (await call(qa, 'read_artifact', version_id=new['version_id']))['result']['content'] == 'new'
+        excerpt = (await call(qa, 'read_artifact', version_id=old['version_id'], start_char=1, max_chars=2))['result']
+        assert excerpt['content'] == 'ld'
+        assert excerpt['text_range'] == {'start_char': 1, 'end_char': 3, 'total_chars': 3}
         for actor in (third, outsider):
             assert not (await call(actor, 'read_artifact', version_id=old['version_id']))['ok']
             before = len(sandbox.runs)
@@ -111,7 +114,7 @@ def test_workspace_acl_assistant_versions_and_search(tmp_path):
         assert found['ok'] and len(requests) == 1
         record = found['result']
         assert record['results'][0] == {'title': 'Example source', 'url': 'https://example.org/article',
-                                        'snippet': 'Example excerpt', 'engine': 'fixture'}
+                                        'snippet': 'Example excerpt', 'engine': 'fixture', 'result_id': 1}
         reloaded = WorkspaceService(db, teams, sandbox, tmp_path / 'artifacts', search)
         saved = await reloaded.execute(qa, 'get_search_result', json.dumps({'search_id': record['search_id']}))
         assert saved['result'] == record

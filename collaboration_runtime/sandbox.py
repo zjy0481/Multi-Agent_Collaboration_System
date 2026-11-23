@@ -13,6 +13,7 @@ import re
 import subprocess
 import tempfile
 import threading
+import time
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -65,7 +66,11 @@ try:
         directory = child
     target = parts[-1]
     if action in ('update', 'delete'):
-        fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        except FileNotFoundError:
+            if action == 'update': sys.exit(42)
+            raise
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode): raise ValueError('not a regular file')
         finally: os.close(fd)
@@ -80,7 +85,10 @@ try:
         with os.fdopen(fd, 'wb') as output:
             output.write(data)
         if action == 'create':
-            os.link(temp, target, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            try:
+                os.link(temp, target, src_dir_fd=directory, dst_dir_fd=directory, follow_symlinks=False)
+            except FileExistsError:
+                sys.exit(41)
             os.unlink(temp, dir_fd=directory)
         else:
             os.replace(temp, target, src_dir_fd=directory, dst_dir_fd=directory)
@@ -189,8 +197,9 @@ class DockerSandbox:
     def _execute(
         self, role: str, command: list[str], *, readonly_workspace: bool = False,
         output_limit: int | None = None, inputs: dict[str, Path] | None = None,
-        stdin_data: bytes | None = None,
+        stdin_data: bytes | None = None, measure_timings: bool = False,
     ) -> dict:
+        started = time.perf_counter() if measure_timings else None
         self._role(role)
         name = self.prefix + "-run-" + uuid.uuid4().hex
         args = self._base(role, name, readonly_workspace, inputs)
@@ -208,6 +217,7 @@ class DockerSandbox:
                     buffer.extend(chunk[:cap + 1 - len(buffer)])
 
         try:
+            process_started = time.perf_counter() if measure_timings else None
             process = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                        stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL)
             workers = [threading.Thread(target=drain, args=(process.stdout, out_buffer, limit), daemon=True),
@@ -228,11 +238,13 @@ class DockerSandbox:
             cleanup_error = None
             try:
                 process.wait(timeout=self.timeout)
+                process_elapsed = time.perf_counter() - process_started if measure_timings else None
             except subprocess.TimeoutExpired:
                 timed_out = True
                 # Remove the named container, not only the Docker CLI process.
                 process.kill()
                 process.wait()
+                process_elapsed = time.perf_counter() - process_started if measure_timings else None
                 try:
                     removed = subprocess.run(
                         ["docker", "rm", "-f", name], capture_output=True, timeout=10, check=False,
@@ -249,17 +261,27 @@ class DockerSandbox:
         decode = lambda b, n: b[:n].decode("utf-8", "replace") + ("\n[output truncated]" if len(b) > n else "")
         result = {"exit_code": process.returncode, "stdout": decode(out, limit),
                   "stderr": decode(err, self.MAX_OUTPUT), "timed_out": timed_out}
+        if measure_timings:
+            result["timings"] = {"wall_seconds": time.perf_counter() - started,
+                                 "docker_cli_seconds": process_elapsed}
         if cleanup_error:
             result["cleanup_error"] = cleanup_error
         if not timed_out and process.returncode in (125, 126, 127):
             raise SandboxError(f"Docker or command startup failed (exit {process.returncode}): {result['stderr'][:2048]}")
         return result
 
-    def run(self, role: str, command: str, *, inputs: dict[str, Path] | None = None) -> dict:
+    def run(self, role: str, command: str, *, inputs: dict[str, Path] | None = None,
+            measure_timings: bool = False) -> dict:
+        """Optionally report host wall time and Docker CLI process elapsed time.
+
+        CLI elapsed time includes startup and is not container lifecycle time.
+        Wall time also includes timeout cleanup and output collection.
+        """
         self._role(role)
         if not isinstance(command, str) or not command or "\x00" in command:
             raise SandboxError("command must be a nonempty string")
-        return self._execute(role, ["/bin/sh", "-c", command], inputs=inputs)
+        return self._execute(role, ["/bin/sh", "-c", command], inputs=inputs,
+                             measure_timings=measure_timings)
 
     def read_bytes(self, workspace_id: str, path: str) -> bytes:
         relative = self._path(path)
@@ -296,6 +318,10 @@ class DockerSandbox:
                 raise SandboxError("workspace write timed out; temporary file cleanup not confirmed") from None
             raise SandboxError("workspace write timed out")
         if result["exit_code"] != 0:
+            if mode == "create" and result["exit_code"] == 41:
+                raise SandboxError("workspace file already exists")
+            if mode == "update" and result["exit_code"] == 42:
+                raise SandboxError("workspace file not found")
             raise SandboxError("cannot write workspace file")
 
     def delete_file(self, workspace_id: str, path: str) -> None:
