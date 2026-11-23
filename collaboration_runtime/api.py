@@ -40,7 +40,7 @@ from .goal_lifecycle import (
     TerminalInput,
 )
 from .local_auth import LocalAuth, Principal, SESSION_COOKIE, operator_credential
-from .model import load_model
+from .model import ChatCompletionsModel, ModelPaused, load_model
 from .roles import ROLE_ID_PATTERN, RoleDefinition, RoleFileError
 from .runtime import ROLES, Runtime, TurnConflict
 from .sandbox import DockerSandbox
@@ -568,7 +568,21 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             )
         except TurnConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ModelPaused as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         return {"turn_id": turn_id, "status": "running"}
+
+    @app.get("/v1/model/status", dependencies=[Depends(_require_operator)])
+    async def model_status():
+        reason = getattr(app.state.runtime.model, "paused_reason", None)
+        return {"status": "paused" if reason else "ready", "reason": reason}
+
+    @app.post("/v1/model/resume", dependencies=[Depends(_require_operator)])
+    async def resume_model():
+        model = app.state.runtime.model
+        if isinstance(model, ChatCompletionsModel):
+            model.resume()
+        return {"status": "ready", "reason": None}
 
     @app.post("/v1/sessions/{role}/turns/{turn_id}/retry", status_code=202,
               dependencies=[Depends(_require_operator)])

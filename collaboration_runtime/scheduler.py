@@ -147,7 +147,8 @@ class DeliveryScheduler:
             try:
                 if self.collaboration.goal_lifecycle is not None:
                     self.collaboration.goal_lifecycle.expire_due_goals()
-                while not self.runtime.closing and len(self.runtime.active) < self.max_parallel:
+                while (not self.runtime.closing and len(self.runtime.active) < self.max_parallel
+                       and getattr(self.runtime.model, "paused_reason", None) is None):
                     claimed = ((self._claim_assistant() or self._claim_one()) if self.assistant_first
                                else (self._claim_one() or self._claim_assistant()))
                     self.assistant_first = not self.assistant_first

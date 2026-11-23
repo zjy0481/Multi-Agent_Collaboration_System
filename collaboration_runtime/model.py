@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from contextvars import ContextVar
 import ipaddress
 import json
 import logging
 import math
 import os
+import time
 from pathlib import Path
 import tomllib
 from urllib.parse import urlsplit, urlunsplit
@@ -25,6 +27,7 @@ PROVIDER_SETTINGS = {
 }
 PROVIDER_LABELS = {"course": "Course API", "deepseek": "DeepSeek API", "opencode": "OpenCode Go API"}
 logger = logging.getLogger(__name__)
+model_request_context: ContextVar[dict] = ContextVar("model_request_context", default={})
 
 
 class ModelError(Exception):
@@ -33,6 +36,10 @@ class ModelError(Exception):
 
 class ModelUnavailable(ModelError):
     """A transient provider failure after the request retry limit."""
+
+
+class ModelPaused(ModelError):
+    """The provider requires operator action before scheduled work can continue."""
 
 
 def _endpoint(base_url: str) -> str:
@@ -79,6 +86,19 @@ def _required_settings(names, values):
     return settings
 
 
+def _timeout_options(values):
+    raw = os.environ.get("COURSE_API_TIMEOUT", values.get("COURSE_API_TIMEOUT"))
+    if raw is None:
+        return {}
+    try:
+        timeout = float(raw)
+    except (TypeError, ValueError):
+        raise ModelError("COURSE_API_TIMEOUT must be a positive finite number") from None
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ModelError("COURSE_API_TIMEOUT must be a positive finite number")
+    return {"timeout": timeout}
+
+
 def _provider_config(config_file: Path) -> tuple[str, dict]:
     try:
         config = tomllib.loads(config_file.read_text(encoding="utf-8-sig"))
@@ -116,6 +136,7 @@ class ChatCompletionsModel:
             raise ModelError(f"{self._label} timeout must be a positive finite number")
         self._model = model.strip()
         self._disable_thinking = mode == "deepseek" or (mode == "opencode" and self._model.startswith("deepseek-"))
+        self.paused_reason: str | None = None
         parts = urlsplit(self._url)
         self.identity = {"mode": mode, "endpoint": urlunsplit((parts.scheme, parts.netloc, "", "", "")), "model": self._model}
         self._client = httpx.AsyncClient(
@@ -124,6 +145,9 @@ class ChatCompletionsModel:
             follow_redirects=False,
             trust_env=False,
         )
+
+    def resume(self) -> None:
+        self.paused_reason = None
 
     async def complete(self, messages: list[dict], tools: list[dict]) -> dict:
         return await self._complete(messages, tools)
@@ -135,13 +159,40 @@ class ChatCompletionsModel:
         if self._disable_thinking:
             payload["thinking"] = {"type": "disabled"}
         for attempt in range(3):
+            if self.paused_reason is not None:
+                raise ModelPaused(self.paused_reason)
+            started = time.monotonic()
+            status = "request_error"
+            http_status = None
+            usage = {}
             try:
                 response = await self._client.post(self._url, json=payload, headers=headers)
+                http_status = response.status_code
+                status = "http_error"
                 if 200 <= response.status_code < 300:
+                    status = "success"
+                    try:
+                        raw_usage = response.json().get("usage", {})
+                        if isinstance(raw_usage, dict):
+                            usage = {key: raw_usage[key] for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+                                     if isinstance(raw_usage.get(key), int) and not isinstance(raw_usage[key], bool) and raw_usage[key] >= 0}
+                            for parent, child, label in (("prompt_tokens_details", "cached_tokens", "cached_tokens"),
+                                                         ("completion_tokens_details", "reasoning_tokens", "reasoning_tokens")):
+                                details = raw_usage.get(parent)
+                                if isinstance(details, dict):
+                                    value = details.get(child)
+                                    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+                                        usage[label] = value
+                    except (ValueError, TypeError, AttributeError):
+                        pass
                     break
                 error = f"{self._label} returned HTTP {response.status_code}"
+                if response.status_code == 402:
+                    self.paused_reason = "Course model paused after provider HTTP 402"
+                    raise ModelPaused(self.paused_reason)
                 retryable = response.status_code in (408, 429, 500, 502, 503, 504)
             except httpx.TimeoutException:
+                status = "timeout"
                 error = f"{self._label} request timed out"
                 retryable = True
             except httpx.RequestError:
@@ -149,6 +200,13 @@ class ChatCompletionsModel:
                 retryable = True
             except (ValueError, TypeError):
                 raise ModelError(f"{self._label} request failed") from None
+            finally:
+                context = model_request_context.get()
+                logger.info("Course model request attempt", extra={
+                    "goal_id": context.get("goal_id"), "turn_id": context.get("turn_id"),
+                    "attempt": attempt + 1, "duration_ms": round((time.monotonic() - started) * 1000, 2),
+                    "status": status, "http_status": http_status, "usage": usage,
+                })
             if not retryable or attempt == 2:
                 raise (ModelUnavailable(error) if retryable else ModelError(error)) from None
             delay = 0.5 * (2 ** attempt)
@@ -193,12 +251,12 @@ class CourseModel(ChatCompletionsModel):
     @classmethod
     def from_env(cls, env_file: Path | None = None) -> CourseModel:
         values = _env_values(PROJECT_ENV if env_file is None else env_file)
-        return cls(*_required_settings(COURSE_SETTINGS, values))
+        return cls(*_required_settings(COURSE_SETTINGS, values), **_timeout_options(values))
 
 
 class OpenCodeModel(ChatCompletionsModel):
-    def __init__(self, base_url: str, model: str, api_key: str):
-        super().__init__(base_url, model, api_key, mode="opencode")
+    def __init__(self, base_url: str, model: str, api_key: str, *, timeout: float = 60):
+        super().__init__(base_url, model, api_key, mode="opencode", timeout=timeout)
         self._standalone_session = uuid4().hex
 
     async def complete(self, messages: list[dict], tools: list[dict]) -> dict:
@@ -249,11 +307,12 @@ def load_model(env_file: Path | None = None) -> ChatCompletionsModel | MockModel
     if mode != "course":
         raise ModelError("COLLABORATION_MODEL_MODE must be course or mock")
     provider, models = _provider_config(env_file.with_name("llm.toml"))
+    timeout = _timeout_options(values)
     if provider == "hkgai":
-        return CourseModel(*_required_settings(COURSE_SETTINGS, values))
+        return CourseModel(*_required_settings(COURSE_SETTINGS, values), **timeout)
     base_url, default_model, key_name = PROVIDER_SETTINGS[provider]
     api_key, = _required_settings((key_name,), values)
     selected_model = models.get(provider, default_model)
     if provider == "opencode":
-        return OpenCodeModel(base_url, selected_model, api_key)
-    return ChatCompletionsModel(base_url, selected_model, api_key, mode=provider)
+        return OpenCodeModel(base_url, selected_model, api_key, **timeout)
+    return ChatCompletionsModel(base_url, selected_model, api_key, mode=provider, **timeout)
