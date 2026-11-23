@@ -9,6 +9,9 @@ import json
 import sqlite3
 
 
+GOAL_CONFIRMATION_PHASE = "goal_confirmation"
+
+
 def _encode(value):
     return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 
@@ -59,6 +62,17 @@ class ExecutionJournal:
                                     WHERE turn_id = ? AND generation = ?''',
                                  (step, phase, _encode(history), turn_id, generation))
         return cursor.rowcount == 1
+
+    def begin_goal_confirmation(self, turn_id: str, generation: int, step: int) -> bool:
+        cursor = self.db.execute("""
+            UPDATE execution_checkpoints SET phase = ?
+            WHERE turn_id = ? AND generation = ? AND step = ? AND phase = 'tools'
+        """, (GOAL_CONFIRMATION_PHASE, turn_id, generation, step))
+        return cursor.rowcount == 1
+
+    def confirming_goal(self, turn_id: str) -> bool:
+        return self.db.execute("SELECT 1 FROM execution_checkpoints WHERE turn_id = ? AND phase = ?",
+                               (turn_id, GOAL_CONFIRMATION_PHASE)).fetchone() is not None
 
     def next_generation(self, turn_id: str) -> int:
         cursor = self.db.execute(

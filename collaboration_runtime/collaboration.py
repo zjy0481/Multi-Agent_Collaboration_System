@@ -612,11 +612,11 @@ class CollaborationService:
             "name": name, "description": description, "parameters": schema.model_json_schema(),
         }} for name, (schema, description) in TOOLS.items()]
 
-    def execute_tool(self, session_id, name, raw_arguments, *, work_message_id=None):
+    def execute_tool(self, session_id, name, raw_arguments, *, work_message_id=None, close_call=None):
         if self.delegation_tools is not None and self.delegation_tools.handles(name):
             return self.delegation_tools.execute(session_id, name, raw_arguments)
         if self.goal_lifecycle is not None and self.goal_lifecycle.handles(name):
-            return self.goal_lifecycle.execute(session_id, name, raw_arguments)
+            return self.goal_lifecycle.execute(session_id, name, raw_arguments, close_call=close_call)
         actor = self.auth.member(session_id)
         if actor is None:
             return {"ok": False, "error": "Collaboration tools require a formal member session"}
