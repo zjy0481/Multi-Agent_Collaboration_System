@@ -14,6 +14,7 @@ from .collaboration import (
     CollaborationInvalid,
     Command,
     ObjectId,
+    QUESTION_ASSIGNMENTS,
     RequestId,
     Text,
     _now,
@@ -415,10 +416,12 @@ class GoalLifecycle:
     def terminal_for_source(self, team_id, source_message_id):
         return self._terminal(source_message_id=source_message_id)
 
-    def question_scope_ended(self, question):
-        if question["goal_id"] is not None:
-            return self._terminal(goal_id=question["goal_id"]) is not None
-        return self._terminal(source_message_id=question["source_message_id"]) is not None
+    def question_scope_ended(self, team_id, question_id):
+        return self.db.execute(f"""
+            {QUESTION_ASSIGNMENTS}
+            SELECT 1 FROM question_assignments a JOIN goal_terminal_facts t
+                ON t.source_message_id = a.assignment_id AND t.team_id = :team
+        """, {"team": team_id, "question_id": question_id}).fetchone() is not None
 
     def validate_prerequisites(self, team_id, actor, goal_ids):
         normalized = list(dict.fromkeys(goal_ids))
@@ -515,13 +518,14 @@ class GoalLifecycle:
         return message_ids
 
     def _scope_objects(self, team_id, goal_id, source_message_id):
-        questions = [dict(row) for row in self.db.execute("""
+        questions = [dict(row) for row in self.db.execute(f"""
+            {QUESTION_ASSIGNMENTS}
             SELECT q.question_id, q.source_message_id, q.answer_message_id, q.closed_at, q.session_id,
                    q.work_event_id, q.work_purpose
-            FROM human_questions q
-            WHERE q.goal_id = ? OR (q.goal_id IS NULL AND q.source_message_id = ?)
+            FROM question_assignments a JOIN human_questions q USING (question_id)
+            WHERE a.assignment_id = :assignment
             ORDER BY q.rowid
-        """, (goal_id, source_message_id))]
+        """, {"team": team_id, "question_id": None, "assignment": source_message_id})]
         corrections = []
         if questions:
             placeholders = ",".join("?" for _ in questions)
