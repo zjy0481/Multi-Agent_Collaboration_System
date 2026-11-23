@@ -1,0 +1,7 @@
+provider = "hkgai"  # 可选：hkgai、deepseek、opencode
+
+[deepseek]
+model = "deepseek-flash"
+
+[opencode]
+model = "deepseek-v4.1-flash"

@@ -12,7 +12,7 @@ from .collaboration import CollaborationInvalid
 from .delegation_tools import TOOLS as DELEGATION_TOOLS
 from .experience import ExperienceTools
 from .journal import ExecutionJournal, GOAL_CONFIRMATION_PHASE
-from .model import ModelError
+from .model import ModelError, complete_model
 from .sandbox import SandboxError
 from .workspace import WorkspaceNotFound
 
@@ -109,6 +109,7 @@ class CloseGoalCall:
 class Runtime:
     def __init__(self, model, sandbox, database: Path, max_steps: int = 12):
         self.model = model
+        self._model_session_scope = str(Path(database).resolve())
         self.sandbox = sandbox
         self.max_steps = max_steps
         self.active: dict[str, ActiveTurn] = {}
@@ -262,6 +263,9 @@ class Runtime:
         )
         return [message for row in rows for message in json.loads(row["history"])]
 
+    async def _complete_model(self, role, messages, tools):
+        return await complete_model(self.model, messages, tools, session_id=f"{self._model_session_scope}:{role}")
+
     def _check_generation(self, turn):
         if not self.journal.current(turn.id, turn.generation):
             raise StaleTurn
@@ -299,7 +303,7 @@ class Runtime:
         try:
             checkpoint = self.journal.checkpoint(turn.id)
             if checkpoint["phase"] == GOAL_CONFIRMATION_PHASE:
-                await self._confirm_goal_close(turn)
+                await self._confirm_goal_close(role, turn)
                 return
             instructions = prompt if prompt is not None else ROLES[role]
             if scheduled:
@@ -337,7 +341,7 @@ class Runtime:
                             role, turn, step, position, call, workspace_id, scheduled=scheduled, pause=pause,
                         )
                         if call["function"]["name"] == "close_goal" and self.journal.confirming_goal(turn.id):
-                            await self._confirm_goal_close(turn)
+                            await self._confirm_goal_close(role, turn)
                             return
                         current.append({"role": "tool", "tool_call_id": call["id"],
                                         "content": json.dumps(result, ensure_ascii=False)})
@@ -366,7 +370,7 @@ class Runtime:
                         current.append({"role": "user", "content": new_text})
                     self._advance(turn, step, phase, current)
                     self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **model_identity)
-                assistant = await self.model.complete(prior + current, tools)
+                assistant = await self._complete_model(role, prior + current, tools)
                 self._check_generation(turn)
                 check_scope()
                 if not is_fork and fork_message_id is None and workspace_id is not None:
@@ -461,7 +465,7 @@ class Runtime:
         self._complete_tool(turn, call.step, call.position, "close_goal", call.call_id,
                             {"ok": True, "result": receipt}, "tool.completed")
 
-    async def _confirm_goal_close(self, turn):
+    async def _confirm_goal_close(self, role, turn):
         self._check_generation(turn)
         checkpoint = self.journal.checkpoint(turn.id)
         history, step = checkpoint["history"], checkpoint["step"]
@@ -489,7 +493,7 @@ class Runtime:
             self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **identity)
 
         # The closed work scope grants a confirmation only, without another tool decision.
-        response = await self.model.complete([
+        response = await self._complete_model(role, [
             {"role": "system", "content": "The goal has ended. Summarize the recorded close_goal result "
                                            "in a short final reply. No further actions are available."},
             {"role": "user", "content": "Confirm the goal's recorded terminal outcome."},

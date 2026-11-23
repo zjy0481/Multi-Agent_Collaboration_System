@@ -1,4 +1,4 @@
-"""Explicitly configured Chat Completions client for the course model."""
+"""Configured model providers that use Chat Completions."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ import json
 import math
 import os
 from pathlib import Path
+import tomllib
 from urllib.parse import urlsplit, urlunsplit
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import httpx
 from dotenv import dotenv_values
@@ -15,6 +17,11 @@ from dotenv import dotenv_values
 
 PROJECT_ENV = Path(__file__).resolve().parents[1] / ".env"
 COURSE_SETTINGS = ("COURSE_API_BASE_URL", "COURSE_API_MODEL", "COURSE_API_KEY")
+PROVIDER_SETTINGS = {
+    "deepseek": ("https://api.deepseek.com", "deepseek-flash", "DEEPSEEK_API_KEY"),
+    "opencode": ("https://opencode.ai/inference/go/openai/v1", "deepseek-v4.1-flash", "OPENCODE_API_KEY"),
+}
+PROVIDER_LABELS = {"course": "Course API", "deepseek": "DeepSeek API", "opencode": "OpenCode Go API"}
 
 
 class ModelError(Exception):
@@ -50,18 +57,60 @@ def _endpoint(base_url: str) -> str:
         raise ModelError("Course API URL must be HTTPS or loopback HTTP, without credentials, query, or fragment") from None
 
 
-class CourseModel:
-    def __init__(self, base_url: str, model: str, api_key: str, *, timeout: float = 60):
+def _env_values(env_file: Path) -> dict:
+    try:
+        return dotenv_values(env_file, encoding="utf-8-sig", interpolate=False)
+    except (OSError, UnicodeError):
+        raise ModelError("Could not read the project .env as UTF-8") from None
+
+
+def _required_settings(names, values):
+    settings = [(os.environ.get(name, values.get(name)) or "").strip() for name in names]
+    missing = [name for name, value in zip(names, settings) if not value]
+    if missing:
+        raise ModelError(f"Set {', '.join(missing)} in the project .env or process environment")
+    return settings
+
+
+def _provider_config(config_file: Path) -> tuple[str, dict]:
+    try:
+        config = tomllib.loads(config_file.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return "hkgai", {}
+    except (OSError, UnicodeError, tomllib.TOMLDecodeError):
+        raise ModelError("Could not read llm.toml as UTF-8 TOML") from None
+    if config.keys() - {"provider", *PROVIDER_SETTINGS}:
+        raise ModelError("llm.toml supports only provider, [deepseek] and [opencode]; put API keys in .env")
+    provider = config.get("provider", "hkgai")
+    if not isinstance(provider, str) or (provider != "hkgai" and provider not in PROVIDER_SETTINGS):
+        raise ModelError("llm.toml provider must be hkgai, deepseek or opencode")
+    models = {}
+    for name in PROVIDER_SETTINGS.keys() & config.keys():
+        section = config[name]
+        if not isinstance(section, dict) or section.keys() - {"model"}:
+            raise ModelError(f"llm.toml [{name}] supports only model; put API keys in .env")
+        if "model" in section:
+            model = section["model"]
+            if not isinstance(model, str) or not model.strip():
+                raise ModelError(f"llm.toml {name}.model must be a non-empty string")
+            models[name] = model.strip()
+    return provider, models
+
+
+class ChatCompletionsModel:
+    def __init__(self, base_url: str, model: str, api_key: str, *, mode: str, timeout: float = 60):
+        self._label = PROVIDER_LABELS[mode]
         self._url = _endpoint(base_url)
         if not isinstance(model, str) or not model.strip():
-            raise ModelError("Course API model is required")
+            raise ModelError(f"{self._label} model is required")
         if not isinstance(api_key, str) or not api_key.strip():
-            raise ModelError("Course API key is required")
+            raise ModelError(f"{self._label} key is required")
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
-            raise ModelError("Course API timeout must be a positive finite number")
+            raise ModelError(f"{self._label} timeout must be a positive finite number")
         self._model = model.strip()
+        self._disable_thinking = mode == "deepseek" or (mode == "opencode" and self._model.startswith("deepseek-"))
         parts = urlsplit(self._url)
-        self.identity = {"mode": "course", "endpoint": urlunsplit((parts.scheme, parts.netloc, "", "", "")), "model": self._model}
+        self.identity = {"mode": mode, "endpoint": urlunsplit((parts.scheme, parts.netloc, "", "", "")), "model": self._model}
         self._client = httpx.AsyncClient(
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout,
@@ -69,38 +118,23 @@ class CourseModel:
             trust_env=False,
         )
 
-    @classmethod
-    def from_env(cls, env_file: Path | None = None) -> CourseModel:
-        """Read course settings locally while keeping file secrets out of os.environ."""
-        try:
-            file_values = dotenv_values(
-                PROJECT_ENV if env_file is None else env_file,
-                encoding="utf-8-sig",
-                interpolate=False,
-            )
-        except (OSError, UnicodeError):
-            raise ModelError("Could not read the project .env as UTF-8") from None
-        values = [
-            (os.environ.get(name, file_values.get(name)) or "").strip()
-            for name in COURSE_SETTINGS
-        ]
-        missing = [name for name, value in zip(COURSE_SETTINGS, values) if not value]
-        if missing:
-            raise ModelError(f"Set {', '.join(missing)} in the project .env or process environment")
-        return cls(*values)
-
     async def complete(self, messages: list[dict], tools: list[dict]) -> dict:
+        return await self._complete(messages, tools)
+
+    async def _complete(self, messages: list[dict], tools: list[dict], *, headers=None) -> dict:
         payload = {"model": self._model, "messages": messages}
         if tools:
             payload["tools"] = tools
+        if self._disable_thinking:
+            payload["thinking"] = {"type": "disabled"}
         try:
-            response = await self._client.post(self._url, json=payload)
+            response = await self._client.post(self._url, json=payload, headers=headers)
         except httpx.TimeoutException:
-            raise ModelError("Course API request timed out") from None
+            raise ModelError(f"{self._label} request timed out") from None
         except (httpx.RequestError, ValueError, TypeError):
-            raise ModelError("Course API request failed") from None
+            raise ModelError(f"{self._label} request failed") from None
         if not 200 <= response.status_code < 300:
-            raise ModelError(f"Course API returned HTTP {response.status_code}")
+            raise ModelError(f"{self._label} returned HTTP {response.status_code}")
         try:
             data = response.json()
             message = data["choices"][0]["message"]
@@ -127,10 +161,42 @@ class CourseModel:
                 raise ValueError
             return {**message, "content": content}
         except (ValueError, TypeError, KeyError, IndexError):
-            raise ModelError("Course API returned an invalid Chat Completions response") from None
+            raise ModelError(f"{self._label} returned an invalid Chat Completions response") from None
 
     async def aclose(self) -> None:
         await self._client.aclose()
+
+
+class CourseModel(ChatCompletionsModel):
+    def __init__(self, base_url: str, model: str, api_key: str, *, timeout: float = 60):
+        super().__init__(base_url, model, api_key, mode="course", timeout=timeout)
+
+    @classmethod
+    def from_env(cls, env_file: Path | None = None) -> CourseModel:
+        values = _env_values(PROJECT_ENV if env_file is None else env_file)
+        return cls(*_required_settings(COURSE_SETTINGS, values))
+
+
+class OpenCodeModel(ChatCompletionsModel):
+    def __init__(self, base_url: str, model: str, api_key: str):
+        super().__init__(base_url, model, api_key, mode="opencode")
+        self._standalone_session = uuid4().hex
+
+    async def complete(self, messages: list[dict], tools: list[dict]) -> dict:
+        return await self.complete_for_session(messages, tools, session_id=self._standalone_session)
+
+    async def complete_for_session(self, messages: list[dict], tools: list[dict], *, session_id: str) -> dict:
+        return await self._complete(messages, tools, headers={
+            "User-Agent": "multi-agent-collaboration/1.0",
+            "X-OpenCode-Session": f"ses_{uuid5(NAMESPACE_URL, session_id).hex}",
+        })
+
+
+async def complete_model(model, messages: list[dict], tools: list[dict], *, session_id: str) -> dict:
+    complete_for_session = getattr(model, "complete_for_session", None)
+    if complete_for_session is not None:
+        return await complete_for_session(messages, tools, session_id=session_id)
+    return await model.complete(messages, tools)
 
 
 class MockModel:
@@ -153,16 +219,22 @@ class MockModel:
         pass
 
 
-def load_model(env_file: Path | None = None) -> CourseModel | MockModel:
-    """Select an explicitly configured mode; never fall back on errors."""
-    try:
-        values = dotenv_values(PROJECT_ENV if env_file is None else env_file, encoding="utf-8-sig", interpolate=False)
-    except (OSError, UnicodeError):
-        raise ModelError("Could not read the project .env as UTF-8") from None
+def load_model(env_file: Path | None = None) -> ChatCompletionsModel | MockModel:
+    """Read the selected provider and only its credentials; never fall back on errors."""
+    env_file = PROJECT_ENV if env_file is None else env_file
+    values = _env_values(env_file)
     configured = os.environ.get("COLLABORATION_MODEL_MODE", values.get("COLLABORATION_MODEL_MODE"))
     mode = "course" if configured is None else configured.strip()
-    if mode == "course":
-        return CourseModel.from_env(env_file)
     if mode == "mock":
         return MockModel()
-    raise ModelError("COLLABORATION_MODEL_MODE must be course or mock")
+    if mode != "course":
+        raise ModelError("COLLABORATION_MODEL_MODE must be course or mock")
+    provider, models = _provider_config(env_file.with_name("llm.toml"))
+    if provider == "hkgai":
+        return CourseModel(*_required_settings(COURSE_SETTINGS, values))
+    base_url, default_model, key_name = PROVIDER_SETTINGS[provider]
+    api_key, = _required_settings((key_name,), values)
+    selected_model = models.get(provider, default_model)
+    if provider == "opencode":
+        return OpenCodeModel(base_url, selected_model, api_key)
+    return ChatCompletionsModel(base_url, selected_model, api_key, mode=provider)

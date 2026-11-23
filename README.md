@@ -2,11 +2,11 @@
 
 ## 项目简介
 
-在本机工作台向一个由模型驱动的团队布置任务。成员可以协商分工、向用户提问、在各自的 Docker 工作区执行任务，并提交带版本的交付物。用户通过网页查看对话、回复问题和下载有权读取的成果。Python 后端调用 HKGAI 课程模型，SQLite 保存团队、会话和任务状态。
+在本机工作台向一个由模型驱动的团队布置任务。成员可以协商分工、向用户提问、在各自的 Docker 工作区执行任务，并提交带版本的交付物。用户通过网页查看对话、回复问题和下载有权读取的成果。Python 后端默认调用 HKGAI 课程模型，也可切换到 DeepSeek 官方 API 或 OpenCode Go。SQLite 保存团队、会话和任务状态。
 
 ## 环境配置
 
-以下命令在 Windows PowerShell 的仓库根目录执行。准备 Python 3.13、运行 Linux 容器的 Docker Desktop，以及课程发放的 HKGAI API Key。首次安装或需要配置可选的联网搜索时，参见[本地环境配置指南](docs/environment-setup.md)。
+以下命令在 Windows PowerShell 的仓库根目录执行。准备 Python 3.13、运行 Linux 容器的 Docker Desktop，以及所选 LLM 供应商的 API Key（默认是课程发放的 HKGAI Key）。首次安装或需要配置可选的联网搜索时，参见[本地环境配置指南](docs/environment-setup.md)。
 
 ```powershell
 if (-not (Test-Path -LiteralPath '.venv/Scripts/python.exe')) {
@@ -19,7 +19,21 @@ if (-not (Test-Path -LiteralPath '.env')) {
 }
 ```
 
-在项目根目录的 `.env` 中填好 `COURSE_API_KEY`。模板已配置课程端点和模型 ID。把 API Key 保留在本机。
+默认使用 HKGAI，在项目根目录的 `.env` 中填好 `COURSE_API_KEY` 即可。模板已配置课程端点和模型 ID。把 API Key 保留在本机。
+
+### 切换 LLM 供应商
+
+如根目录没有 `llm.toml`，运行 `Copy-Item llm.example.toml llm.toml`。修改 `llm.toml` 第一行的 `provider`，在现有 `.env` 中新增或填写对应的 Key，再重启服务。不要覆盖已有的 `.env`。`llm.toml` 和 `.env` 都不会提交到 Git。
+
+| `provider` | `.env` 中的 Key | 模型 |
+| --- | --- | --- |
+| `hkgai`（默认） | `COURSE_API_KEY` | 保留 `.env` 中的 `COURSE_API_BASE_URL` 和 `COURSE_API_MODEL` |
+| `deepseek` | `DEEPSEEK_API_KEY` | 默认 `deepseek-flash`，可修改 `[deepseek].model` |
+| `opencode` | `OPENCODE_API_KEY` | 默认 OpenCode Go 的 `deepseek-v4.1-flash`，可修改 `[opencode].model` |
+
+- OpenCode 使用 [Go 订阅的 Console API](https://opencode.ai/docs/console/go/)，不调用 OpenCode CLI。请使用 Go 工作区的 Key，以及支持 Chat Completions 和工具调用的模型；默认 DeepSeek 模型可能需要管理员在 Console 隐私设置中允许 `Global` 区域。
+- DeepSeek 模型请求显式关闭思考模式，以兼容含已有工具调用的会话历史。运行记录区分 `course`、`deepseek` 和 `opencode`；`COLLABORATION_MODEL_MODE=course` 是兼容旧配置的联网模式，会读取 `llm.toml`，设为 `mock` 则始终离线。缺少所选 Key 时启动报错，不会换用其他供应商。
+- 切换后，新供应商可能收到既有会话历史。建议先结束进行中的回合；若不希望转发旧会话，可用新的 `COLLABORATION_STATE_DIR` 启动。课程 HKGAI 专项测试仍需选择 `hkgai`。
 
 ## 启动
 

@@ -6,7 +6,7 @@ import hashlib
 import json
 from uuid import UUID, uuid4, uuid5
 
-from .model import ModelError
+from .model import ModelError, complete_model
 from .roles import RoleDefinition, parse_roles
 from .sandbox import SandboxError
 
@@ -60,7 +60,7 @@ class TeamService:
         self.db = db
         self.model = model
         self.sandbox = sandbox
-        self.bootstrap = bootstrap or self._select_lead
+        self.bootstrap = bootstrap
         self.jobs = {}
         self.member_locks = {}
         self.db.executescript("""
@@ -99,8 +99,9 @@ class TeamService:
             );
         """)
 
-    async def _select_lead(self, roles: tuple[RoleDefinition, ...]) -> LeadDecision:
-        message = await self.model.complete(
+    async def _select_lead(self, roles: tuple[RoleDefinition, ...], team_id: str) -> LeadDecision:
+        message = await complete_model(
+            self.model,
             [
                 {
                     "role": "system",
@@ -117,6 +118,7 @@ class TeamService:
                 ])},
             ],
             [BOOTSTRAP_TOOL],
+            session_id=f"bootstrap:{team_id}",
         )
         try:
             call, = message["tool_calls"]
@@ -212,9 +214,10 @@ class TeamService:
 
     async def _plan(self, team_id, name, roles):
         try:
-            decision = await self.bootstrap(roles)
+            decision = (await self._select_lead(roles, team_id) if self.bootstrap is None
+                        else await self.bootstrap(roles))
         except ModelError as exc:
-            raise TeamUnavailable("Could not obtain a Lead decision from the course model") from exc
+            raise TeamUnavailable("Could not obtain a Lead decision from the configured model") from exc
         role_ids = {role.role_id for role in roles}
         if (
             not isinstance(decision, LeadDecision)
