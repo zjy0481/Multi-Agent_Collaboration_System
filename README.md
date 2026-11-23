@@ -1,180 +1,68 @@
-# Multi-Agent_Collaboration_System
+# 多智能体协作平台
 
-本机工作台支持导入角色、建组、增员、群聊和双方私聊。Python 连接课程模型的 Chat Completions 接口，SQLite 保存团队、契约、消息、待办与会话回合，Docker 提供私有执行空间。回合与中途输入参考 [Codex App Server](https://learn.chatgpt.com/docs/app-server)。完整平台交付范围见[详细需求](docs/grill_result/agent-collaboration/requirement.md)。
+## 项目简介
 
-## 启动
+在本机工作台向一个由模型驱动的团队布置任务。成员可以协商分工、向用户提问、在各自的 Docker 工作区执行任务，并提交带版本的交付物。用户通过网页查看对话、回复问题和下载有权读取的成果。Python 后端调用 HKGAI 课程模型，SQLite 保存团队、会话和任务状态。
 
-在可访问 Linux Docker Engine 的 PowerShell 中执行。第一次打开项目时，从模板生成本地 `.env`，已有文件会保留。
+## 环境配置
+
+以下命令在 Windows PowerShell 的仓库根目录执行。准备 Python 3.13、运行 Linux 容器的 Docker Desktop，以及课程发放的 HKGAI API Key。首次安装或需要配置可选的联网搜索时，参见[本地环境配置指南](docs/environment-setup.md)。
 
 ```powershell
-python -m pip install -r requirements.txt
+if (-not (Test-Path -LiteralPath '.venv/Scripts/python.exe')) {
+    python -m venv .venv
+}
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 docker build -t collaboration-sandbox:local -f docker/Dockerfile docker
 if (-not (Test-Path -LiteralPath '.env')) {
     Copy-Item -LiteralPath '.env.example' -Destination '.env'
 }
 ```
 
-打开项目根目录的 `.env`，把老师给的 Key 粘贴到 `COURSE_API_KEY=` 后面并保存。模板已填好 HKGAI 基址和模型 ID。更换课程 API 或模型时，可编辑对应两行并重启服务。`.env` 已由 Git 忽略；同名进程环境变量优先，新开终端可使用文件配置。
+在项目根目录的 `.env` 中填好 `COURSE_API_KEY`。模板已配置课程端点和模型 ID。把 API Key 保留在本机。
+
+## 启动
 
 ```powershell
-python -m uvicorn collaboration_runtime.api:app --host 127.0.0.1 --port 8000 --workers 1
+.\.venv\Scripts\python.exe -m uvicorn collaboration_runtime.api:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-首次启动会在状态目录生成 `operator-token`；妥善保管该文件。访问 [主页](http://127.0.0.1:8000/) 可用令牌登录，API 使用 `Authorization: Bearer <token>`。建组、增员及旧双角色入口使用 operator 令牌。使用单进程访问同一个状态目录。缺少课程配置时启动报错。默认状态目录为 `.tmp/runtime`，可用 `COLLABORATION_STATE_DIR` 指定另一个目录。该目录应由宿主管理，包含会话历史与已发布材料。
+保持该终端运行。首次启动会在状态目录创建 `operator-token`，用于网页登录和本机管理 API。默认状态目录为 `.tmp/runtime`。如果启动时设置了 `COLLABORATION_STATE_DIR`，请从所选目录读取令牌。
 
-## 导入角色并建组
+## 使用教程
 
-把官方角色 Markdown 原文交给 `POST /v1/teams`。宿主用一次过渡模型决策识别 Lead 或创建一个通用 Lead，准备好每个成员的 Docker 工作区后返回成员清单和第 1 版分工契约。读取原始角色说明时保留提示正文，格式错误会返回文件行号。
+### 1. 导入角色并建组
 
-```powershell
-$operatorToken = (Get-Content -LiteralPath '.tmp/runtime/operator-token' -Raw).Trim()
-$headers = @{ Authorization = "Bearer $operatorToken" }
-$roster = Get-Content -LiteralPath 'test samples/scenario_1_software_engineering 2/01_role_initialization.md' -Raw -Encoding UTF8
-$requestId = [guid]::NewGuid().ToString('N')
-$body = @{ request_id = $requestId; roster = $roster } | ConvertTo-Json
-$team = Invoke-RestMethod 'http://127.0.0.1:8000/v1/teams' -Method Post -Headers $headers -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($body))
-$team.members | Select-Object role_id, name, session_id, workspace_id
-```
-
-准备失败时重复发送同一请求体，宿主复用已经分配的标识。用 `GET /v1/teams/{team_id}` 查看当前成员。用 `POST /v1/teams/{team_id}/members` 提交 `request_id`、`expected_version`、`role_id`、`name` 和 `prompt` 增员，工作区就绪后才发布下一版契约。用 `GET /v1/teams/{team_id}/contracts/{version}` 可核对历史版本。operator 调用 `POST /v1/teams/{team_id}/members/{member_id}/credential` 获取成员 token；再次调用会轮换凭据，使旧 token 失效。使用该成员 token 和其 `session_id`，发送 `POST /v1/sessions/{session_id}/turns` 可用原角色提示在专属工作区执行命令。
-
-## T002 团队协作
-
-在[工作台](http://127.0.0.1:8000/)登录后选择团队，可发送群聊或双方私聊。点名用成员 ID 定向投递。真人发出的未点名群聊默认投递 Lead，未点名的进展消息只供读者查看。真人可用 `assignment` 记录原始布置，用 `supplement` 引用原始布置补充信息。Lead 可在原始布置上登记目标，首项目标进入活动状态，后续目标排队。
-
-- `GET /v1/teams` 列出当前身份可访问的团队。`POST /v1/teams/{team_id}/messages` 接收 `request_id`、`text` 和可选的 `recipient_id`、`mentions`、`reply_to`、`kind`。重试同一条消息时复用原请求键与参数。
-- `GET /v1/teams/{team_id}/snapshot` 返回可见消息、目标和游标。`GET /v1/teams/{team_id}/events?after=<cursor>` 接续后续事件，重连优先使用 `Last-Event-ID`。游标绑定团队和读者，可补读最近 512 个团队事件，收到 `stream.reset` 时重新取快照。
-- `GET /v1/teams/{team_id}/deliveries` 返回该成员的待领取记录。Lead 用 `POST /v1/teams/{team_id}/goals` 提交 `request_id` 和 `source_message_id`。正式成员模型工具也可发送消息、查询可见消息和参与者，Lead 可用 `register_goal` 登记布置。
-
-消息续读使用 FastAPI 0.139.0 的原生 SSE 和浏览器 `EventSource`。可运行 `python -m pytest -q tests/test_collaboration.py` 核对权限、并发重放、待办恢复和目标排队。 [FastAPI SSE](https://fastapi.tiangolo.com/tutorial/server-sent-events/) · [T002 验收用例](tests/test_collaboration.py)
-
-## T003 真人澄清
-
-正式成员可用 `ask_human` 提问，传入 `request_id`、已投递给本会话的 `source_message_id` 和 `text`。登记目标前也可询问。问题默认显示在群聊，引用双方私聊中的布置会保留原可见范围。
-
-1. 在工作台「待答问题」点击「答复」，输入答案并发送。服务端按引用认定原提问者，即使消息同时点名其他成员。
-2. 同一工作还有其他问题待答时继续阻塞。最后一条有效答复产生一条 `clarification.resume` 待办，包含原工作消息 ID 和相关答复 ID。已答问题如需变更，可引用原答复发送更正，提问者和引用了该决定的正式成员会收到通知。
-3. 发起提问的模型回合以 `waiting_human` 释放会话执行槽。问题和待办保存在 SQLite，重启后可用原引用答复。T003 可通过 `GET /v1/teams/{team_id}/deliveries` 核对恢复投递，待办自动领取和启动模型回合由 T006 接入。
-
-## T004 委托协商与任务修订
-
-正式成员可以在有权访问的活动目标内发起委托。模型先用 `list_delegation` 查看活动目标与可见的草案、任务，再用 `create_proposal` 提出条款。首次协商使用独立的 `scope_id`，基于现有任务的修订指定 `task_id` 和 `base_revision`。条款包含交付物、验收条件、负责人和主审，也可指定额外承诺方、输入版本、父任务和前置任务。涉及负责人或主审变更时，受影响的原角色和新角色均需确认。
-
-- `POST /v1/teams/{team_id}/proposals` 创建草案。`POST /v1/proposals/{proposal_id}/counter` 替换条款并生成新版本。新版本重新收集确认，旧记录可通过 `GET /v1/proposals/{proposal_id}?version=N` 查询。
-- 承诺方通过 `/confirm` 确认当前版本，也可通过 `/reject` 拒绝。当前版本的提出方可通过 `/withdraw` 撤回。拒绝和撤回保留原因，重新发起首次协商时使用新的 `scope_id`。
-- 全部承诺方确认后，由获授权正式成员通过 `/assign` 或 `/update` 登记。各写入携带 `request_id`，草案操作携带 `expected_version`。同版登记重放返回原回执。基础修订改变时返回 `409`，对可读的版本提供条款差异。向 `/counter` 提交当前 `base_revision` 和重议条款可继续协商。
-- `GET /v1/teams/{team_id}/tasks/{task_id}?revision=N` 查询有效任务及历史修订。登记产生可见的 `task.assigned` 或 `task.updated` 事件和定向通知，群进展仅展示公开状态。助手凭由宿主授权的协商范围和工具提交草案，确认与登记由正式成员完成。
-
-完整请求结构见本机的[接口文档](http://127.0.0.1:8000/docs)。可运行 `python -m pytest -q tests/test_delegation.py` 复验协商、权限、重放、依赖与通知。
-
-用现有 HKGAI 模型 `t2_hkgai-v3_fp8_1m_e7` 联调时，Lead 读取活动目标、创建草案、登记任务并更新至修订 2，负责人通过模型确认草案。其余确认由测试通过同一 HTTP 接口提交。四个模型回合均完成，五次工具回执均匹配原调用 ID。设置 `RUN_LIVE_DELEGATION_TESTS=1` 后可运行 `python -m pytest -q -s tests/test_delegation_live.py`；隔离工作树可用 `DELEGATION_COURSE_ENV_FILE` 指向已有课程配置文件。
-
-## T005 私有工作区与产物交接
-
-对已导入团队的正式成员发起回合。成员可以调用 `create_file`、`read_file`、`update_file`、`delete_file` 操作自己的工作区，并通过 `run_command` 执行代码和测试。工作区文件使用相对路径，发布或文件写入单次上限为 1 MiB。
-
-1. 请开发成员创建并自测一个文件，再调用 `list_workspace_readers` 取得测试成员的 `session_id`，通过 `publish_artifact` 指定该读者。工具返回 `artifact_id`、数字版本和 `version_id`。传回相同 `artifact_id` 可发布下一版。
-2. 请测试成员用 `list_artifacts` 或 `read_artifact` 确认所验版本，在 `run_command` 的 `artifact_version_ids` 传入对应 ID。该命令可从 `/inputs/<version_id>/artifact` 读取指定只读文件。测试脚本仍写进自己的 `/workspace`。
-3. 本机可信操作者也可用 `GET /v1/artifacts/{artifact_id}/versions/{version}` 下载指定数字版本，以成员 token 认证；无版本读权时返回 404。身份由 token 决定。模型工具的会话身份由运行时注入。
-
-宿主在登记助手时指定独立工作区、允许的工具和授权版本。每次取文件和挂载都会检查该范围仍然有效，历史回合分支的入口由 T007 接入。
-
-已获准的检索服务可在启动进程设置 `COURSE_SEARCH_URL` 为 SearXNG 的 `/search` JSON 端点，需要认证时用 `COURSE_SEARCH_API_KEY`。成员调用 `search_web` 得到来源和 `search_id`，可用 `get_search_result` 取回自己的记录。搜索由宿主发起，执行容器的外网继续隔离。真实检索来源的课程联调归 T013。 [SearXNG JSON 接口](https://docs.searxng.org/dev/search_api.html) · [T005 集成证据](docs/t005-validation.md)
-
-## T006 持久调度
-
-投递消息后，后台调度器自动为正式成员领取待办并启动回合。每个会话一次推进一项工作，服务最多同时调度四个会话。容量已满的工作保留在待办接口，成员可通过 `GET /v1/sessions/{session_id}/turns` 查看回合状态。真人引用答复可为对应工作自动启动后续回合。
-
-回合重启时优先续接原待办，模型消息和工具结果按原调用 ID 成组恢复。若动作已开始且缺少回执，需要核对结果的回合标记为 `needs_reconciliation`。默认 `COLLABORATION_MODEL_MODE=course`，课程配置错误会直接显示；在隔离状态目录启动时可显式选择 `mock` 查看调度流程。
-
-复验可运行 `python -m pytest -q tests/test_scheduler.py tests/test_journal.py tests/test_model_config.py`。本机验证版本包括 Python 3.14.5（PSF）、SQLite 3.50.4（公有领域）、FastAPI 0.139.0（MIT）、HTTPX 0.28.1（BSD-3-Clause）和 Uvicorn 0.51.0（BSD-3-Clause）。 [依赖锁定](requirements.txt)
-
-真实 HKGAI 抽查使用课程模型 `t2_hkgai-v3_fp8_1m_e7`。模型在第一步调用 `list_participants`，第二步用真实返回的成员 ID 调用 `send_message` 写入群内进展。两次回执保留原调用 ID，回合状态为 `completed`。该抽查使用临时团队与沙箱替身，Docker 隔离由独立回归验证。
-
-## T007 从已完成回合派助手
-
-正式成员用自己的凭据调用 `GET /v1/sessions/{session_id}/turns?completed_only=true` 选择检查点，通过 `POST /v1/sessions/{session_id}/forks` 创建助手。也可以在自己的模型回合调用 `fork_session`。请求包括 `request_id`、`from_turn_id`、活动 `goal_id`、`purpose`，以及首次协商的 `scope_id` 或已有任务的 `task_id` 和 `expected_revision`。用 `history_turn_ids`、`version_ids`、`allowed_tools`、`contact_session_ids` 限定可继承的历史、材料、工具及联系人。
-
-- 助手有独立会话、私有工作区和持久待办。历史按指定检查点投影，只交接明确选择的输入与可验证的工具材料。模型的自由回复可能复述其他会话内容，因此不会随检查点自动继承。后续材料用 `POST /v1/forks/{assistant_id}/handoff` 显式交接固定版本。
-- 父成员及获准联系人可通过 `/v1/forks/{assistant_id}/messages` 与助手私下答疑。两位助手只有在同一工作范围内且双方父成员互相授权时才能直接联系。父成员可以查看自己发起的助手回合状态，并在 `/decision` 采用或退回直接收到的结果，以原消息 ID 为证据。
-- 首次协商关闭、任务修订变更或目标结束后，旧范围停止接收工作。父成员也可调用 `/revoke` 撤销授权。已启动的容器命令可能在原隔离区结束，其结果不能继续写入协作状态。
-
-常规验收运行 `python -m pytest -q tests/test_forks.py`。设置 `RUN_LIVE_FORK_TESTS=1` 后运行 `python -m pytest -q -s tests/test_forks_live.py` 可复验真实 HKGAI 助手使用所选历史及授权文件版本，读取文件后以原工具回执为依据向父成员汇报。
-
-## T009 目标结案与终止
-
-Lead 用 `POST /v1/teams/{team_id}/goals/{goal_id}/acceptance` 发布目标验收约定的新修订，列明必需交付及对应任务；`GET /v1/teams/{team_id}/goals/{goal_id}` 同时返回当前约定、排队前置条件、截止时间和终态事实。成功结案要求当前验收中的每项必需交付都有当前有效审查、没有未答问题，并提交覆盖这些交付的可读最终版本。用户可用 `POST .../terminate` 写入 `cancelled`；Lead 可提交带证据的 `failed` 或成功 `completed`。
-
-终态冻结载荷在库内保留完整任务验收事实供 T010 重算；HTTP 与 `get_goal` 读取按读者既有的消息、任务及产物权限投影，只保留合法计数、必需交付摘要和有权限读取的证据及最终交付，不向无权限读者披露非最终版本、审查正文或助手会话关联。
-
-活动目标结束后，同一事务冻结任务与验收证据、关闭该目标范围内的未来投递、可恢复/运行中普通回合、助手工作、未答问题及未登记草案，并给 Lead 写入终态通知。回复目标原始布置的 `supplement` 及其答复线程属于该目标；其他目标的队列项和独立会话不被关闭。Lead 用 `POST .../activate` 激活队列中最早满足前置条件的一项。登记前终止使用 `/v1/teams/{team_id}/assignments/{message_id}/terminate`，之后登记同一原始布置返回 `409`。
-
-一次性启动进程时设置独立的 `COLLABORATION_HOST_TOKEN`，宿主可用 Bearer 凭据调用 `POST /v1/host/teams/{team_id}/goals/{goal_id}/terminal-events`，以稳定 `event_key` 幂等写入 `failed` 或 `timed_out` 事实；该凭据不能是 operator 或成员凭据。设置 `COLLABORATION_GOAL_TIMEOUT_SECONDS` 可让宿主在登记时持久化固定策略截止时间，调度器到期后写入带策略来源和复核时间的 `timed_out` 事实。模型单次错误不会自动变成目标失败。
-
-运行 `python -m pytest -q tests/test_goal_lifecycle.py tests/test_scheduler.py tests/test_forks.py` 复验权限、修订、冻结、在途/可恢复回合、迟到答复、版本读取和队列激活。
-
-## T011 真人审批 Git 推送
-
-安装 Git，准备仅由本机操作者管理的裸仓库，并在启动服务的进程设置目标目录。目标名称是裸仓库文件夹名去掉 `.git`。
-
-```powershell
-New-Item -ItemType Directory -Force -Path .tmp/git-remotes | Out-Null
-git init --bare .tmp/git-remotes/demo.git
-$env:COLLABORATION_GIT_TARGETS_DIR = (Resolve-Path .tmp/git-remotes).Path
-```
-
-在群里将工作派给成员。成员从私有工作区选择文件，用 `create_git_commit` 形成提交，再用 `request_push` 提交仓库、目标 ref、完整 SHA 和请求键。工作台「待审批推送」显示精确参数。操作者批准后才会执行一次普通快进推送，拒绝则把结果投递回原会话。若推送后结果不明，服务重启时核对原目标 ref 并且不重发。原成员也可用 `get_git_action` 查看状态。
-
-T011 使用本地可控裸仓库完成验收，真实 GitHub 交付由 T016 验证。
-
-## T013 真实端点联调
-
-以下测试需要显式开启。课程模型测试会使用本机课程凭据及真实 Docker 工作区。它验证缺省 Lead 建组，再令模型将私有文件中在运行时随机生成的值通过两次工具调用写入群聊。
-
-```powershell
-$env:RUN_LIVE_COURSE_TESTS = '1'
-python -m pytest -q -s tests/test_course_integration.py
-```
-
-联调记录使用 `course` 模式、`api1.hkgai.net`、模型 `t2_hkgai-v3_fp8_1m_e7` 和 Chat Completions。真实模型生成了缺省 Lead，并在不同模型步骤发出 `read_file` 和 `send_message`。测试核对了两个原工具调用 ID、私有文件的随机值与群聊记录。认证失败由 HTTP 401 测试传输验证，无需向课程端点提交无效密钥。
-
-取得获准检索服务后，可在本机 `.env` 填写 `COURSE_SEARCH_URL` 为该服务的 SearXNG `/search` JSON 接口，必要时填写 `COURSE_SEARCH_API_KEY`。使用固定公开查询验证真实来源，重启后按 `search_id` 读取原结果。
-
-```powershell
-$env:RUN_LIVE_SEARCH_TESTS = '1'
-$env:RUN_LIVE_COURSE_SEARCH_TESTS = '1'
-python -m pytest -q -s tests/test_live_search.py
-```
-
-第一个用例直接验证检索记录的持久化和会话读取权限。第二个用例使用真实课程模型，依次调用 `search_web`、`get_search_result`、`send_message`，按原调用 ID 核对检索编号、来源 URL 和群聊记录。真实检索验收使用本机 SearXNG `2026.11.13-8a53a6aa5` 的环回 JSON 接口，已取得 SQLite 文档来源。
-
-## 开发与测试双角色
-
-打开本机的 [接口交互页](http://127.0.0.1:8000/docs)，或在另一个 PowerShell 中使用：
+新状态目录中的工作台会显示「暂无团队」。当前需要先通过本机 API 创建团队。服务启动后，另开一个 PowerShell，在仓库根目录执行以下命令。示例导入软件开发团队，也可以将 `$rosterPath` 改为其他官方样例的 `01_role_initialization.md`。
 
 ```powershell
 $operatorToken = (Get-Content -LiteralPath '.tmp/runtime/operator-token' -Raw).Trim()
 $headers = @{ Authorization = "Bearer $operatorToken" }
-$base = 'http://127.0.0.1:8000/v1/sessions'
-$request = @{ text = '用 Python 做一个最小预订冲突检查，在私有区运行自测，然后发布 booking.py 给 tester。' } | ConvertTo-Json
-$run = Invoke-RestMethod "$base/developer/turns" -Method Post -Headers $headers -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($request))
-$turn = "$base/developer/turns/$($run.turn_id)"
-curl.exe -N -H "Authorization: Bearer $operatorToken" "$turn/events"
+$rosterPath = 'test samples/scenario_1_software_engineering 2/01_role_initialization.md'
+$roster = Get-Content -LiteralPath $rosterPath -Raw -Encoding UTF8
+$body = @{
+    request_id = [guid]::NewGuid().ToString('N')
+    roster = $roster
+} | ConvertTo-Json
+$team = Invoke-RestMethod 'http://127.0.0.1:8000/v1/teams' -Method Post `
+    -Headers $headers -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+$team.members | Select-Object role_id, name
 ```
 
-当回合仍在运行时，在接口交互页调用 `POST /v1/sessions/developer/turns/{turn_id}/steer`，提交 `{"text":"再检查紧邻的两个时段可以分别预订" }`。补充内容会在下一次模型决策前进入同一回合。GET 原回合地址可查看最后结果，事件流支持按 `Last-Event-ID` 接续。
+返回成员列表后即可在网页选中团队。若建组失败，先排查错误，再在同一终端用已有的 `$body` 重跑 `Invoke-RestMethod` 请求，保留原请求 ID。
 
-看到 `publish_artifact` 成功后，给 `POST /v1/sessions/tester/turns` 发送 `{"text":"列出已发布产物，读取 booking.py 的发布版本，在自己的工作区编写并运行测试。" }`。测试角色用 `list_artifacts` 取得只读路径，在自己的 `/workspace` 写测试。发布快照以单个文件为单位，最多 1 MiB。已发布版本保留原内容，更新源文件后发布会获得新版本 ID。
+### 2. 登录并布置任务
 
-同一角色一次只执行一个回合，两个角色可以并行。已经开始的工具可以结束并保存回执。收到新输入时，旧决策中尚未开始的工具会交给模型重新判断。服务重启后，已完成会话继续可用，未完成回合标记为中断，避免自动重做工具动作。
+1. 打开[本机工作台](http://127.0.0.1:8000/)，用同一个 `operator-token` 登录。若已登录且仍显示「暂无团队」，点击右上角「刷新」，再从「团队」下拉框选中刚创建的团队。
+2. 在「群聊」将消息类型选为「布置」，输入任务并发送。可用所选场景的 `02_task_1.md` 作为第一题。默认由 Lead 接收，目标登记后可在「活动与排队目标」查看状态。三组角色和题目见[官方样例](<test samples/README.md>)。
+3. 团队提出问题时，在「待答问题」点击对应的「答复」，然后输入并发送答案。第一题结束后，可在同一团队布置 `03_task_2.md`，延续既有协作记录。
 
-## 检查
+### 3. 查看交付物
 
-```powershell
-python -m pip install pytest
-python -m pytest -q
-$env:RUN_DOCKER_TESTS = '1'
-python -m pytest -q
-```
+在「任务交付」展开有权读取的任务，即可查看当前与历史提交、验证证据和审查决定。点击具体版本链接下载文件。
 
-普通测试用明确注入的模型、工具及检索传输替身检查多步回合、授权、产物版本和检索来源记录。开启 Docker 测试后会使用真实容器核对角色隔离、文件工具、旧版只读复验、凭据隔离、默认无外网及超时清理。测试无需课程凭据。
+## 参考
+
+- [本机 API 文档](http://127.0.0.1:8000/docs)
+- [项目详细需求](docs/grill_result/agent-collaboration/requirement.md)
+- [真实环境联调记录](docs/live-validation.md)
