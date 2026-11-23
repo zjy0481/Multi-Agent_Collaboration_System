@@ -30,6 +30,11 @@ class Command(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+class RequiredInput(Command):
+    owner_id: ObjectId
+    version_ids: Annotated[list[ObjectId], Field(min_length=1, max_length=100)]
+
+
 class MessageInput(Command):
     request_id: RequestId
     text: Text
@@ -38,6 +43,7 @@ class MessageInput(Command):
     reply_to: ObjectId | None = None
     goal_id: ObjectId | None = None
     kind: Literal["chat", "progress", "assignment", "supplement"] = "chat"
+    required_inputs: Annotated[list[RequiredInput], Field(default_factory=list, max_length=100)]
 
 
 class GoalInput(Command):
@@ -348,6 +354,8 @@ class CollaborationService:
         key = (team_id, actor.id, "send_message", body.request_id)
         mentions = sorted(set(body.mentions))
         digest_body = body.model_dump(exclude={"request_id"})
+        if not body.required_inputs:
+            digest_body.pop("required_inputs")
         if body.goal_id is None:
             digest_body.pop("goal_id")
         digest = self._digest({**digest_body, "mentions": mentions})
@@ -413,11 +421,19 @@ class CollaborationService:
                 raise CollaborationForbidden("Only the user can submit assignments or supplements")
             if body.kind == "assignment" and (source or recipient not in {None, team["lead_member_id"]}):
                 raise CollaborationInvalid("An original assignment must be in the group or a private thread with the Lead")
+            if body.required_inputs and (not actor.is_operator or body.kind != "assignment"):
+                raise CollaborationForbidden("Only the user can declare required inputs on an assignment")
+            if any(rule.owner_id not in members for rule in body.required_inputs):
+                raise CollaborationInvalid("Required input owner must be a formal team member")
             if body.kind == "supplement" and (not source or source["kind"] != "assignment"):
                 raise CollaborationInvalid("A supplement must reference the original assignment")
 
             receipt = self._create_message(team_id, actor, recipient=recipient, text=body.text,
                                            kind=body.kind, mentions=mentions, reply_to=body.reply_to)
+            for rule in body.required_inputs:
+                for version_id in set(rule.version_ids):
+                    self.db.execute("INSERT OR IGNORE INTO assignment_required_inputs VALUES (?, ?, ?)",
+                                    (receipt["message_id"], rule.owner_id, version_id))
             if body.goal_id is not None:
                 self.db.execute("INSERT INTO message_goal_scopes VALUES (?, ?)",
                                 (receipt["message_id"], body.goal_id))

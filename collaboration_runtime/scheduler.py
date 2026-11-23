@@ -18,6 +18,20 @@ from .workspace import WorkspaceNotFound
 logger = logging.getLogger(__name__)
 
 
+def _delivery_guidance(payload):
+    """Give short, event-specific suggestions without making acceptance decisions."""
+    purpose = payload['delivery']['purpose']
+    if purpose == 'task.submitted':
+        return {'review': ('Use the task revision and submitted versions in this delivery. Review those versions against '
+                           'the acceptance criteria and traceable evidence. Report a specific gap or decision for each '
+                           'criterion. Read only the needed passages when the evidence locations are known.')}
+    if purpose in ('task.assigned', 'task.ready', 'task.returned'):
+        return {'delivery': ('Make the smallest version a reviewer can check. If an input is missing, share the specific '
+                             'blocker and continue independent work where possible. Use list_delegation with compact=true '
+                             'when you only need assignment or review status.')}
+    return None
+
+
 class DeliveryScheduler:
     def __init__(self, runtime, collaboration, workspace, *, max_parallel=4):
         if type(max_parallel) is not int or max_parallel < 1:
@@ -81,6 +95,9 @@ class DeliveryScheduler:
                         payload = self.collaboration.execution_input(delivery, principal)
                         if version_ids is not None:
                             self.runtime.fork_messages.add_delivery_versions(payload, fork_message_id, version_ids)
+                        guidance = _delivery_guidance(payload)
+                        if guidance is not None:
+                            payload['platform_guidance'] = guidance
                         text = json.dumps(payload, ensure_ascii=False)
                         turn_id = self.runtime.create_turn(session, text)
                         self.db.execute('''INSERT INTO scheduled_turns(turn_id, event_id, session_id, purpose)
@@ -147,7 +164,8 @@ class DeliveryScheduler:
             try:
                 if self.collaboration.goal_lifecycle is not None:
                     self.collaboration.goal_lifecycle.expire_due_goals()
-                while not self.runtime.closing and len(self.runtime.active) < self.max_parallel:
+                while (not self.runtime.closing and len(self.runtime.active) < self.max_parallel
+                       and getattr(self.runtime.model, "paused_reason", None) is None):
                     claimed = ((self._claim_assistant() or self._claim_one()) if self.assistant_first
                                else (self._claim_one() or self._claim_assistant()))
                     self.assistant_first = not self.assistant_first

@@ -12,7 +12,7 @@ from .collaboration import CollaborationInvalid
 from .delegation_tools import TOOLS as DELEGATION_TOOLS
 from .experience import ExperienceTools
 from .journal import ExecutionJournal, GOAL_CONFIRMATION_PHASE
-from .model import ModelError, ModelUnavailable, complete_model
+from .model import ModelError, ModelPaused, ModelUnavailable, complete_model, model_request_context
 from .sandbox import SandboxError
 from .workspace import WorkspaceNotFound
 
@@ -226,6 +226,8 @@ class Runtime:
         turn.task = asyncio.create_task(self._run(role, turn, prompt, workspace_id))
 
     def start(self, role: str, text: str, *, prompt: str | None = None, workspace_id: str | None = None) -> str:
+        if reason := getattr(self.model, "paused_reason", None):
+            raise ModelPaused(reason)
         if self.closing or role in self.active or self.db.execute("""
             SELECT 1 FROM turns WHERE role = ? AND status IN ('running', 'recoverable')
         """, (role,)).fetchone():
@@ -281,8 +283,12 @@ class Runtime:
         return [message for row in rows if message_ids is None or row["message_id"] in message_ids
                 for message in json.loads(row["history"])]
 
-    async def _complete_model(self, role, messages, tools):
-        return await complete_model(self.model, messages, tools, session_id=f"{self._model_session_scope}:{role}")
+    async def _complete_model(self, role, turn_id, goal_id, messages, tools):
+        token = model_request_context.set({"turn_id": turn_id, "goal_id": goal_id})
+        try:
+            return await complete_model(self.model, messages, tools, session_id=f"{self._model_session_scope}:{role}")
+        finally:
+            model_request_context.reset(token)
 
     def _check_generation(self, turn):
         if not self.journal.current(turn.id, turn.generation):
@@ -325,6 +331,7 @@ class Runtime:
                 return
             instructions = prompt if prompt is not None else ROLES[role]
             history_scope = None
+            goal_id = None
             if scheduled:
                 instructions += DELIVERY_PROMPT
                 delivery = self.db.execute("""
@@ -334,7 +341,7 @@ class Runtime:
                 fork_message_id = self.collaboration.fork_message_for_delivery(delivery)
                 message = json.loads(checkpoint["history"][0]["content"])["message"]
                 actor = self.workspace_tools.actor(role)
-                _, history_scope = self.collaboration.goal_scope_for_message(actor.team_id, message["id"])
+                goal_id, history_scope = self.collaboration.goal_scope_for_message(actor.team_id, message["id"])
                 if history_scope is None and message["kind"] == "assignment":
                     history_scope = {message["id"]}
             version_ids = check_scope()
@@ -398,7 +405,9 @@ class Runtime:
                         current.append({"role": "user", "content": new_text})
                     self._advance(turn, step, phase, current)
                     self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **model_identity)
-                assistant = await self._complete_model(role, prior + current, tools)
+                if scheduled and goal_id is None:
+                    goal_id = self.collaboration.goal_for_message(actor.team_id, message["id"])
+                assistant = await self._complete_model(role, turn.id, goal_id, prior + current, tools)
                 self._check_generation(turn)
                 check_scope()
                 if not is_fork and fork_message_id is None and workspace_id is not None:
@@ -427,6 +436,11 @@ class Runtime:
         except UnknownToolOutcome as exc:
             if self.journal.current(turn.id, turn.generation):
                 self._finish(turn.id, "needs_reconciliation", error=str(exc))
+        except ModelPaused as exc:
+            with self.db:
+                if self.journal.current(turn.id, turn.generation):
+                    self._event(turn.id, "model.paused", generation=turn.generation, error=str(exc))
+                    self._write_finish(turn.id, "recoverable" if scheduled or is_fork else "failed", error=str(exc))
         except ModelError as exc:
             with self.db:
                 if self.journal.current(turn.id, turn.generation):
@@ -518,6 +532,7 @@ class Runtime:
                 message = {"role": "tool", "tool_call_id": call_id, "content": json.dumps(result, ensure_ascii=False)}
                 history.append(message)
                 if name == "close_goal" and result["ok"]:
+                    goal_id = result["result"]["goal_id"]
                     closing_pair = [{"role": "assistant", "content": None, "tool_calls": [call]}, message]
             if closing_pair is None:
                 raise ModelError("The closed goal has no recorded tool receipt")
@@ -525,7 +540,7 @@ class Runtime:
             self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **identity)
 
         # The closed work scope grants a confirmation only, without another tool decision.
-        response = await self._complete_model(role, [
+        response = await self._complete_model(role, turn.id, goal_id, [
             {"role": "system", "content": "The goal has ended. Summarize the recorded close_goal result "
                                            "in a short final reply. No further actions are available."},
             {"role": "user", "content": "Confirm the goal's recorded terminal outcome."},

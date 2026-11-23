@@ -234,3 +234,42 @@ def test_explicit_mock_mode_does_not_require_selected_provider_key(tmp_path):
     env_file.write_text("COLLABORATION_MODEL_MODE=mock\n", encoding="utf-8")
     (tmp_path / "llm.toml").write_text('provider = "opencode"\n', encoding="utf-8")
     assert load_model(env_file).identity["mode"] == "mock"
+
+
+def test_course_timeout_from_environment_and_validation(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("COURSE_API_BASE_URL=https://example.invalid\nCOURSE_API_MODEL=m\nCOURSE_API_KEY=k\nCOURSE_API_TIMEOUT=90\n", encoding="utf-8")
+    monkeypatch.setenv("COURSE_API_TIMEOUT", "12.5")
+    model = CourseModel.from_env(env_file)
+    assert model._client.timeout.read == 12.5
+    asyncio.run(model.aclose())
+    monkeypatch.setenv("COURSE_API_TIMEOUT", "nan")
+    with pytest.raises(ModelError, match="COURSE_API_TIMEOUT"):
+        CourseModel.from_env(env_file)
+
+
+def test_request_diagnostics_are_correlated_and_exclude_content(caplog):
+    import logging
+    from collaboration_runtime.model import model_request_context
+
+    async def run():
+        model = CourseModel("https://example.invalid", "m", "secret")
+        await model._client.aclose()
+        model._client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "private response"}}],
+            "usage": {"prompt_tokens": 10, "total_tokens": 12, "prompt_tokens_details": {"cached_tokens": 3}, "completion_tokens_details": {"reasoning_tokens": 1}, "private": "secret"},
+        })))
+        token = model_request_context.set({"goal_id": "g", "turn_id": "t"})
+        try:
+            await model.complete([{"role": "user", "content": "private prompt"}], [])
+        finally:
+            model_request_context.reset(token)
+            await model.aclose()
+
+    with caplog.at_level(logging.INFO, logger="collaboration_runtime.model"):
+        asyncio.run(run())
+    record = next(r for r in caplog.records if r.message == "Course model request attempt")
+    assert (record.goal_id, record.turn_id, record.attempt, record.status, record.http_status) == ("g", "t", 1, "success", 200)
+    assert record.duration_ms >= 0
+    assert record.usage == {"prompt_tokens": 10, "total_tokens": 12, "cached_tokens": 3, "reasoning_tokens": 1}
+    assert "private" not in str(record.__dict__) and "secret" not in str(record.__dict__)

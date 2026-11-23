@@ -73,7 +73,7 @@ Remove-Item Env:RUN_DOCKER_TESTS
 
 检索由 Windows 上的工作台宿主发起。宿主请求 `127.0.0.1:8888` 上的 SearXNG，SearXNG 再通过 `host.docker.internal:7897` 访问宿主的 HTTP 代理和上游搜索引擎。成员的执行容器继续使用 `--network none`。Docker Desktop 提供 `host.docker.internal`，供容器访问宿主服务。 [Docker Desktop 网络说明](https://docs.docker.com/desktop/features/networking/networking-how-tos/) · [沙箱实现](../collaboration_runtime/sandbox.py)
 
-检索结果包含上游状态。`read_source` 读取当前会话搜索记录中的精确公网 HTTPS 链接，记录获取时间和内容摘要，`get_source` 可读取证据。正文读取由宿主直接解析域名并发起 HTTPS 连接，支持 HTML 和纯文本，当前不跟随重定向。
+检索结果包含上游状态。`read_source` 可用结果编号或精确 URL 读取当前会话搜索记录中的公网 HTTPS 链接，支持 HTML 和纯文本。宿主最多跟随五次重定向，每跳重新校验并固定公网地址。证据保存原始 URL、最终 URL、跳转链、获取时间及内容哈希，可用 `get_source` 取回。
 
 ### 验证 Windows 代理
 
@@ -194,6 +194,12 @@ $env:RUN_LIVE_COURSE_SEARCH_TESTS = '1'
 .\.venv\Scripts\python.exe -m pytest -q -s tests/test_live_search.py -k course_model
 Remove-Item Env:RUN_LIVE_COURSE_SEARCH_TESTS
 ```
+
+## 模型端点暂停与恢复
+
+课程模型返回 HTTP 402 时，当前进程暂停领取新的模型待办。已领取的可恢复工作保留原回合和工具回执。操作者可通过本地 OpenAPI 页面查看 `GET /v1/model/status`。处理余额或配额后，使用操作者凭据调用 `POST /v1/model/resume`，调度器继续领取队列中的工作。该接口解除本地暂停，后续真实模型请求负责验证端点是否恢复。目标截止时间继续按原设置计算。重启服务会重新检查端点，待办和检查点仍保存在 SQLite。 [本地 API](http://127.0.0.1:8000/docs)
+
+模型工具可按需查询 `list_delegation` 的 `compact` 视图。搜索结果的 `result_id` 可用于读取本次搜索命中的原文，也可沿用精确 URL。文本读取工具支持用 `start_char` 和 `max_chars` 指定片段。排查沙箱延迟时，可在 `run_command` 中启用 `measure_timings`，回执会报告总用时和 Docker CLI 进程用时。
 
 ## 已知问题与验收状态
 

@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints, Validation
 
 from .artifacts import ArtifactError, ArtifactNotFound, ArtifactStore
 from .sandbox import SandboxError
+from .validation_feedback import validation_feedback
 from .search import SearchError
 from .source_fetch import fetch_public_source
 
@@ -60,6 +61,7 @@ class WriteArgs(PathArgs):
 class CommandArgs(ToolArgs):
     command: Text
     artifact_version_ids: list[Identifier] = Field(default_factory=list, max_length=16)
+    measure_timings: bool = False
 
 
 class PublishArgs(PathArgs):
@@ -67,7 +69,12 @@ class PublishArgs(PathArgs):
     artifact_id: Identifier | None = None
 
 
-class ReadArtifactArgs(ToolArgs):
+class TextWindowArgs(ToolArgs):
+    start_char: int = Field(default=0, ge=0)
+    max_chars: int | None = Field(default=None, ge=1, le=40_000)
+
+
+class ReadArtifactArgs(TextWindowArgs):
     version_id: Identifier
 
 
@@ -80,11 +87,12 @@ class SearchResultArgs(ToolArgs):
     search_id: Identifier
 
 
-class SourceArgs(SearchResultArgs):
-    url: Text
+class SourceArgs(SearchResultArgs, TextWindowArgs):
+    url: Text | None = None
+    result_id: int | None = Field(default=None, ge=1, strict=True)
 
 
-class SourceRecordArgs(ToolArgs):
+class SourceRecordArgs(TextWindowArgs):
     source_id: Identifier
 
 
@@ -93,16 +101,30 @@ TOOLS = {
     "create_file": (WriteArgs, "Create a UTF-8 file in your private workspace."),
     "update_file": (WriteArgs, "Replace an existing UTF-8 file in your private workspace."),
     "delete_file": (PathArgs, "Delete a regular file in your private workspace."),
-    "run_command": (CommandArgs, "Run a command or tests in your workspace. Pass exact artifact version IDs to import them read-only."),
+    "run_command": (CommandArgs, "Run a command or tests in your workspace. Pass exact artifact version IDs to import them read-only. "
+                    "Set measure_timings only when diagnosing sandbox latency."),
     "list_workspace_readers": (ToolArgs, "List eligible participants for your artifact publication."),
     "publish_artifact": (PublishArgs, "Publish a file snapshot to explicitly named readers. An artifact ID publishes the next version."),
     "list_artifacts": (ToolArgs, "List artifact versions you are authorized to read."),
-    "read_artifact": (ReadArtifactArgs, "Read an authorized version as UTF-8 and get its read-only mount path."),
+    "read_artifact": (ReadArtifactArgs, "Read an authorized UTF-8 version and get its read-only mount path. "
+                      "Use max_chars and start_char for an excerpt."),
     "search_web": (SearchArgs, "Search the host-configured retrieval source and record URLs and excerpts."),
     "get_search_result": (SearchResultArgs, "Retrieve a search record made by this execution session."),
-    "read_source": (SourceArgs, "Read the public HTTPS text of an exact URL in your own search result and record evidence."),
-    "get_source": (SourceRecordArgs, "Retrieve your recorded source text and provenance."),
+    "read_source": (SourceArgs, "Record evidence from a search result by result_id (1-based) or exact URL. "
+                    "Optional max_chars limits the returned excerpt; the full captured text is still recorded."),
+    "get_source": (SourceRecordArgs, "Retrieve recorded source text and provenance. Use max_chars and start_char for an excerpt."),
 }
+
+
+def _text_window(record, field, args):
+    if args.start_char == 0 and args.max_chars is None:
+        return record
+    value = record[field]
+    start = min(args.start_char, len(value))
+    end = len(value) if args.max_chars is None else min(start + args.max_chars, len(value))
+    return {**record, field: value[start:end], "text_range": {
+        "start_char": start, "end_char": end, "total_chars": len(value),
+    }}
 
 
 class WorkspaceService:
@@ -276,8 +298,12 @@ class WorkspaceService:
             result = await self._execute(actor, name, args)
             self.actor(session_id)
             return {"ok": True, "result": result}
-        except ValidationError:
-            return {"ok": False, "error": "Invalid tool arguments"}
+        except ValidationError as exc:
+            if name == "read_source":
+                error = "Invalid read_source arguments: provide search_id and a positive integer result_id or exact URL"
+            else:
+                error = "Invalid tool arguments"
+            return {"ok": False, "error": error, "errors": validation_feedback(exc, TOOLS[name][0])}
         except UnicodeError:
             return {"ok": False, "error": "This tool requires UTF-8 text; use a read-only artifact mount for binary files"}
         except (WorkspaceNotFound, ArtifactError, SearchError, SandboxError) as exc:
@@ -297,7 +323,8 @@ class WorkspaceService:
             return {"path": args.path}
         if name == "run_command":
             inputs = {version_id: self._resolve(actor, version_id)[1] for version_id in args.artifact_version_ids}
-            return await asyncio.to_thread(self.sandbox.run, workspace, args.command, inputs=inputs)
+            timing = {"measure_timings": True} if args.measure_timings else {}
+            return await asyncio.to_thread(self.sandbox.run, workspace, args.command, inputs=inputs, **timing)
         if name == "list_workspace_readers":
             return self._readers(actor)
         if name == "publish_artifact":
@@ -324,28 +351,37 @@ class WorkspaceService:
             return list({item["version_id"]: self._artifact_view(item) for item in versions}.values())
         if name == "read_artifact":
             metadata, path = self._resolve(actor, args.version_id)
-            return {**self._artifact_view(metadata), "content": path.read_text(encoding="utf-8")}
+            record = {**self._artifact_view(metadata), "content": path.read_text(encoding="utf-8")}
+            return _text_window(record, "content", args)
         if name == "search_web":
             return await self._search(actor, args.query, args.limit)
         if name == "get_search_result":
             return self._search_record(actor, args.search_id)
         if name == "read_source":
             search = self._search_record(actor, args.search_id)
-            if args.url not in [item['url'] for item in search['results']]:
-                raise WorkspaceNotFound('URL not found in this search record')
-            result = await asyncio.to_thread(fetch_public_source, args.url)
+            if (args.url is None) == (args.result_id is None):
+                raise WorkspaceNotFound('Provide exactly one of result_id or url')
+            if args.result_id is not None:
+                if args.result_id > len(search['results']):
+                    raise WorkspaceNotFound('result_id out of bounds for this search record')
+                url = search['results'][args.result_id - 1]['url']
+            else:
+                url = args.url
+                if url not in [item['url'] for item in search['results']]:
+                    raise WorkspaceNotFound('URL not found in this search record')
+            result = await asyncio.to_thread(fetch_public_source, url)
             self.actor(actor.session_id)
             result.update(source_id=uuid4().hex, search_id=args.search_id,
                           retrieved_at=datetime.now(timezone.utc).isoformat())
             with self.db:
                 self.db.execute('INSERT INTO workspace_sources VALUES (?, ?, ?, ?, ?)',
                     (result['source_id'], actor.team_id, actor.session_id, actor.scope_id, json.dumps(result, ensure_ascii=False)))
-            return result
+            return _text_window(result, "text", args)
         row = self.db.execute('SELECT data FROM workspace_sources WHERE source_id = ? AND team_id = ? AND session_id = ? AND scope_id IS ?',
                               (args.source_id, actor.team_id, actor.session_id, actor.scope_id)).fetchone()
         if row is None:
             raise WorkspaceNotFound('Source record not found')
-        return json.loads(row['data'])
+        return _text_window(json.loads(row['data']), "text", args)
 
     async def _search(self, actor: Actor, query: str, limit: int):
         if self.search is None:
@@ -359,7 +395,7 @@ class WorkspaceService:
                 (search_id, actor.team_id, actor.session_id, actor.scope_id, query, json.dumps(results, ensure_ascii=False),
                  'degraded' if getattr(results, 'degraded', False) else 'ok'),
             )
-        return {"search_id": search_id, "query": query, "results": list(results),
+        return {"search_id": search_id, "query": query, "results": [{**item, "result_id": i} for i, item in enumerate(results, 1)],
                 "upstream_status": "degraded" if getattr(results, "degraded", False) else "ok"}
 
     def _search_record(self, actor: Actor, search_id: str):
@@ -370,5 +406,5 @@ class WorkspaceService:
         ).fetchone()
         if row is None:
             raise WorkspaceNotFound("Search record not found")
-        return {"search_id": search_id, "query": row["query"], "results": json.loads(row["results"]),
+        return {"search_id": search_id, "query": row["query"], "results": [{**item, "result_id": i} for i, item in enumerate(json.loads(row["results"]), 1)],
                 "upstream_status": row["upstream_status"]}

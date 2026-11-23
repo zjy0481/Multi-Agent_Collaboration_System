@@ -288,6 +288,33 @@ def test_private_goal_and_artifact_references_keep_their_audiences(tmp_path):
         assert client.get(f"{base}/messages/{task['notification_message_id']}", headers=auth(member_token)).status_code == 404
 
 
+def test_assignment_required_inputs_are_scoped_and_enforced(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens = setup_team(client)
+        owner, reviewer, unrelated = others[:3]
+        lead_id, owner_id, reviewer_id = lead['member_id'], owner['member_id'], reviewer['member_id']
+        version = client.portal.call(partial(
+            client.app.state.workspace.artifacts.publish, team_id=base.rsplit('/', 1)[-1],
+            author_session_id=lead['session_id'], source_path='required.txt', content=b'input',
+            reader_session_ids=[owner['session_id'], reviewer['session_id']],
+        ))['version_id']
+        source = send(client, base, OPERATOR, request_id=key(), text='Goal', kind='assignment',
+                      required_inputs=[{'owner_id': owner_id, 'version_ids': [version]}])
+        goal = ok(client.post(f'{base}/goals', headers=auth(tokens[lead_id]),
+                              json={'request_id': key(), 'source_message_id': source['message_id']}))['goal_id']
+        payload = {'request_id': key(), 'goal_id': goal, 'scope_id': key(), 'terms': terms(owner_id, reviewer_id)}
+        failure = client.post(f'{base}/proposals', headers=auth(tokens[lead_id]), json=payload)
+        assert failure.status_code == 422 and version in failure.text
+        create(client, base, tokens[lead_id], goal, terms(unrelated['member_id'], unrelated['member_id']))
+        draft = create(client, base, tokens[lead_id], goal, terms(owner_id, reviewer_id, input_version_ids=[version]))
+        assert action(client, draft['proposal_id'], tokens[owner_id], 'counter',
+                      terms=terms(owner_id, reviewer_id)).status_code == 422
+        payload['terms'] = terms(owner_id, unrelated['member_id'], input_version_ids=[version])
+        assert client.post(f'{base}/proposals', headers=auth(tokens[lead_id]), json=payload).status_code == 403
+        confirm_all(client, draft['proposal_id'], tokens)
+        ok(action(client, draft['proposal_id'], tokens[lead_id], 'assign'))
+
+
 def test_registration_rechecks_graph_after_other_revision(tmp_path):
     with TestClient(app(tmp_path)) as client:
         base, lead, _, tokens, goal = context(client)
@@ -327,3 +354,44 @@ def test_confirmation_history_and_registration_recover_after_restart(tmp_path):
         receipt = ok(action(client, pid, lead_token, 'assign', 2))
         assert ok(action(client, pid, tokens[owner], 'assign', 2)) == receipt
         assert len(snapshot(client, base, lead_token)['tasks']) == 1
+
+
+def test_compact_snapshot_filters_acl_and_bounds_results(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens, goal = context(client)
+        lead_id = lead['member_id']
+        a, b, c = [member['member_id'] for member in others[:3]]
+        first = create(client, base, tokens[a], goal, terms(a, b))
+        create(client, base, tokens[a], goal, terms(a, b))
+        collaboration = client.app.state.collaboration
+        service = client.app.state.delegation
+        actor = client.portal.call(collaboration.auth.resolve, tokens[a])
+        outsider = client.portal.call(collaboration.auth.resolve, tokens[c])
+        team_id = base.rsplit('/', 1)[-1]
+        compact = client.portal.call(service.compact_snapshot, team_id, actor, goal, 1)
+        assert len(compact['proposals']) == 1 and compact['truncated']['proposals']
+        assert set(compact['proposals'][0]) == {'id', 'goal_id', 'task_id', 'scope_id', 'version', 'status', 'pending_member_ids'}
+        hidden = client.portal.call(service.compact_snapshot, team_id, outsider, goal)
+        assert hidden['proposals'] == [] and not hidden['truncated']['proposals']
+        confirm_all(client, first['proposal_id'], tokens)
+        assigned = ok(action(client, first['proposal_id'], tokens[a], 'assign'))
+        compact = client.portal.call(service.compact_snapshot, team_id, actor, goal)
+        assert compact['tasks'][0]['id'] == assigned['task_id']
+        assert compact['tasks'][0]['revision'] == 1
+        full = client.portal.call(service.snapshot, team_id, actor)
+        compact_bytes = len(json.dumps(compact).encode())
+        full_bytes = len(json.dumps(full).encode())
+        print(f'compact={compact_bytes} full={full_bytes}')
+        assert compact_bytes < full_bytes
+
+
+def test_compact_snapshot_includes_active_goal_without_delegation(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens, goal = context(client)
+        collaboration = client.app.state.collaboration
+        service = client.app.state.delegation
+        actor = client.portal.call(collaboration.auth.resolve, tokens[lead['member_id']])
+        team_id = base.rsplit('/', 1)[-1]
+        compact = client.portal.call(service.compact_snapshot, team_id, actor)
+        assert compact['active_goals'] == [{'id': goal, 'status': 'active', 'revision': 1}]
+        assert compact['proposals'] == [] and compact['tasks'] == []
