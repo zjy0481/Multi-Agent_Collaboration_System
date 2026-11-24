@@ -293,7 +293,7 @@ class WorkspaceService:
         if actor.parent_session_id is not None and self.assistant_readers is not None:
             allowed.update(self.assistant_readers(actor.session_id))
         return [
-            {key: member[key] for key in ("session_id", "role_id", "name")}
+            {key: member[key] for key in ("session_id", "member_id", "role_id", "name")}
             for member in self.teams.get(actor.team_id)["members"]
             if member["session_id"] != actor.session_id
             and (actor.parent_session_id is None or member["session_id"] in allowed)
@@ -354,9 +354,17 @@ class WorkspaceService:
         if name == "list_workspace_readers":
             return self._readers(actor)
         if name == "publish_artifact":
-            eligible = {reader["session_id"] for reader in self._readers(actor)}
-            if not set(args.reader_session_ids) <= eligible:
-                raise WorkspaceNotFound("Artifact reader not found in this execution scope")
+            readers = self._readers(actor)
+            invalid = set(args.reader_session_ids) - {r["session_id"] for r in readers}
+            if invalid:
+                member = self.teams.session(actor.session_id)
+                if actor.session_id in invalid or (member and member["member_id"] in invalid):
+                    raise WorkspaceNotFound("The author already has access. Omit yourself from reader_session_ids.")
+                replacements = [f"{r['member_id']} -> {r['session_id']}" for r in readers if r["member_id"] in invalid]
+                if replacements:
+                    raise WorkspaceNotFound("Use session IDs for these eligible members: " + ", ".join(replacements)
+                                            + ". Check list_workspace_readers before publishing.")
+                raise WorkspaceNotFound("Artifact reader unavailable. Choose session IDs from list_workspace_readers.")
             data = await asyncio.to_thread(self.sandbox.read_bytes, workspace, args.path)
             self.actor(actor.session_id)
             return self._artifact_view(self.artifacts.publish(
