@@ -20,7 +20,9 @@ def _exchanges(messages):
 
 def _compact_delivery(message):
     payload = json.loads(message["content"])
-    keep = {key: payload[key] for key in ("message", "goal_id", "source_message", "fork_message") if key in payload}
+    keep = {key: payload[key]
+            for key in ("message", "goal_id", "source_message", "fork_message", "next_goal_activation")
+            if key in payload}
     keep["delivery"] = {key: value for key, value in payload["delivery"].items()
                         if key in ("purpose", "event_id", "session_id", "message_id")}
     if payload.get("answers"):

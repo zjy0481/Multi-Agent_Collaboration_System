@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 def _delivery_guidance(payload):
     """Give short, event-specific suggestions without making acceptance decisions."""
     purpose = payload['delivery']['purpose']
+    if purpose == 'goal.terminal':
+        return {'activation': ('Use next_goal_activation to activate the earliest eligible queued goal. '
+                               'Finish this notification after the tool receipt so the next delivery can run.')}
     if purpose == 'task.submitted':
         return {'review': ('Use the task revision and submitted versions in this delivery. Review those versions against '
                            'the acceptance criteria and traceable evidence. Report a specific gap or decision for each '
@@ -93,6 +96,15 @@ class DeliveryScheduler:
                         turn_id = delivery['turn_id']
                     else:
                         payload = self.collaboration.execution_input(delivery, principal)
+                        if delivery['purpose'] == 'goal.terminal':
+                            activation = self.collaboration.goal_lifecycle.next_eligible_queued_goal(delivery['team_id'])
+                            if activation is None:
+                                self.db.execute("""
+                                    UPDATE message_deliveries SET status = 'completed'
+                                    WHERE event_id = ? AND session_id = ? AND purpose = ? AND status = 'pending'
+                                """, (delivery['event_id'], session, delivery['purpose']))
+                                continue
+                            payload['next_goal_activation'] = activation
                         if version_ids is not None:
                             self.runtime.fork_messages.add_delivery_versions(payload, fork_message_id, version_ids)
                         guidance = _delivery_guidance(payload)

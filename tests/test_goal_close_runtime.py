@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
 from test_collaboration import OPERATOR, Sandbox, auth, bootstrap, send, setup_team
-from test_goal_lifecycle import accept_task, acceptance, goal, lifecycle
+from test_goal_lifecycle import accept_task, acceptance, goal, lifecycle, terminate
 
 
 def key():
@@ -59,10 +59,12 @@ class ClosingModel:
             return {"role": "assistant", "content": "Done"}
         text = str(last.get("content") or "")
         try:
-            delivery = json.loads(text).get("delivery", {})
+            payload = json.loads(text)
+            delivery = payload.get("delivery", {})
         except (ValueError, AttributeError):
             delivery = {}
         if delivery.get("purpose") == "goal.terminal" and self.next_goal_id:
+            assert payload["next_goal_activation"]["goal_id"] == self.next_goal_id
             return {"role": "assistant", "content": None, "tool_calls": [call("activate_goal", "activate-call", {
                 "request_id": "activate-next", "goal_id": self.next_goal_id, "expected_revision": 1,
             })]}
@@ -282,3 +284,55 @@ def test_manual_close_preserves_receipt_and_skips_remaining_tools(tmp_path, repl
         assert [item["message_id"] for item in inbox if item["purpose"] == "goal.terminal"] == [
             json.loads(close["result"])["result"]["notification_message_id"],
         ]
+
+
+def test_terminal_notice_with_no_eligible_goal_leaves_lead_free(tmp_path):
+    class Model:
+        def __init__(self):
+            self.seen = []
+            self.next_assignment = threading.Event()
+
+        async def complete(self, messages, tools):
+            payload = json.loads(messages[-1]["content"])
+            purpose = payload["delivery"]["purpose"]
+            self.seen.append(purpose)
+            if purpose == "goal.terminal":
+                await asyncio.Event().wait()
+            if payload["message"]["text"] == "New independent assignment":
+                self.next_assignment.set()
+            return {"role": "assistant", "content": "Done"}
+
+    model = Model()
+    with TestClient(create_scheduled_app(tmp_path, model)) as client:
+        base, lead, _, tokens = setup_team(client)
+        lead_token = tokens[lead["member_id"]]
+        first = send(client, base, OPERATOR, request_id=key(), text="Cancelled assignment", kind="assignment")
+        first_id = goal(client, base, lead_token, first)["goal_id"]
+        blocked = send(client, base, OPERATOR, request_id=key(), text="Dependent assignment", kind="assignment")
+        blocked_id = goal(client, base, lead_token, blocked, prerequisites=[first_id])["goal_id"]
+        stopped = terminate(client, base, OPERATOR, first_id, 1, "cancelled", reason="End first assignment")
+        assert stopped.status_code == 201, stopped.text
+        notice = stopped.json()["notification_message_id"]
+
+        def notice_handled():
+            response = client.get(f"{base}/messages/{notice}/deliveries", headers=auth(OPERATOR))
+            return response.status_code == 200 and response.json()[0]["status"] == "completed"
+
+        wait_until(notice_handled)
+        send(client, base, OPERATOR, request_id=key(), text="New independent assignment", kind="assignment")
+        assert model.next_assignment.wait(8)
+        assert "goal.terminal" not in model.seen
+        assert lifecycle(client, base, lead_token, blocked_id)["goal"]["status"] == "queued"
+
+
+
+
+def test_terminal_activation_survives_compact_delivery():
+    from collaboration_runtime.context_window import _compact_delivery
+
+    activation = {"goal_id": "queued-goal", "expected_revision": 2}
+    message = {"role": "user", "content": json.dumps({
+        "delivery": {"purpose": "goal.terminal", "event_id": 1},
+        "message": {"id": "notice"}, "next_goal_activation": activation,
+    })}
+    assert json.loads(_compact_delivery(message)["content"])["next_goal_activation"] == activation
