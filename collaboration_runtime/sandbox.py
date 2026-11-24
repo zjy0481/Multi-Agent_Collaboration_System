@@ -267,7 +267,10 @@ class DockerSandbox:
         if cleanup_error:
             result["cleanup_error"] = cleanup_error
         if not timed_out and process.returncode in (125, 126, 127):
-            raise SandboxError(f"Docker or command startup failed (exit {process.returncode}): {result['stderr'][:2048]}")
+            message = f"Docker or command startup failed (exit {process.returncode}): {result['stderr'][:2048]}"
+            if process.returncode == 127 and "curl: not found" in result["stderr"]:
+                message += "\nUse Python urllib.request to test a server inside the sandbox. For web sources, use search_web and read_source."
+            raise SandboxError(message)
         return result
 
     def run(self, role: str, command: str, *, inputs: dict[str, Path] | None = None,

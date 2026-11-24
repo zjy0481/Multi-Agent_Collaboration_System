@@ -157,7 +157,9 @@ def test_registered_member_sessions_use_independent_docker_workspaces(sandbox, t
 
     class Model:
         async def complete(self, messages, tools):
-            assert messages[0]["content"] == expected_prompt
+            system_prompt = messages[0]["content"]
+            assert system_prompt.startswith(expected_prompt)
+            assert "Return at most 8 tool calls" in system_prompt[len(expected_prompt):]
             assert {"run_command", "read_file", "publish_artifact"} <= {tool["function"]["name"] for tool in tools}
             if messages[-1]["role"] == "tool":
                 execution = json.loads(messages[-1]["content"])

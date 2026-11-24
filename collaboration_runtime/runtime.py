@@ -18,6 +18,7 @@ from .workspace import WorkspaceNotFound
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_STEPS = 20
+MAX_TOOL_CALLS_PER_DECISION = 8
 
 ROLES = {
     "developer": "You are the developer. Implement and test the requested changes. "
@@ -355,6 +356,8 @@ class Runtime:
                 prior_history = self.forks.model_history(role, turn.id)
             else:
                 prior_history = self._history(role, history_scope)
+            instructions += (f"\n\nReturn at most {MAX_TOOL_CALLS_PER_DECISION} tool calls in any single decision. "
+                             "Split larger batches across decisions.")
             prior = [{"role": "system", "content": instructions}, *prior_history]
             current, step, phase = (checkpoint[key] for key in ("history", "step", "phase"))
             if version_ids is not None:
@@ -365,6 +368,11 @@ class Runtime:
                 SELECT COALESCE(SUM(CAST(json_extract(payload, '$.extra_steps') AS INTEGER)), 0)
                 FROM events WHERE turn_id = ? AND type = 'model.retry_requested'
             """, (turn.id,)).fetchone()[0]
+            previous_decision = self.db.execute("""
+                SELECT json_extract(payload, '$.discarded') FROM events
+                WHERE turn_id = ? AND type = 'model.completed' ORDER BY seq DESC LIMIT 1
+            """, (turn.id,)).fetchone()
+            overflowed = bool(previous_decision and previous_decision[0])
             while phase == "tools" or step < self.max_steps + extra_steps:
                 self._check_generation(turn)
                 check_scope()
@@ -408,15 +416,30 @@ class Runtime:
                     self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **model_identity)
                 if scheduled and goal_id is None:
                     goal_id = self.collaboration.goal_for_message(actor.team_id, message["id"])
-                assistant = await self._complete_model(role, turn.id, goal_id, prior + current, tools)
+                messages = prior + current
+                if overflowed:
+                    messages.append({"role": "user", "content": (
+                        f"The previous decision was discarded without execution because it exceeded the host limit "
+                        f"of {MAX_TOOL_CALLS_PER_DECISION} tool calls. Replan within that limit."
+                    )})
+                assistant = await self._complete_model(role, turn.id, goal_id, messages, tools)
                 self._check_generation(turn)
                 check_scope()
                 if not is_fork and fork_message_id is None and workspace_id is not None:
                     self.workspace_tools.actor(role)
-                current.append(assistant)
                 count = len(assistant.get("tool_calls") or [])
-                if count > 8:
-                    raise ModelError("Model returned too many tools in one decision")
+                if count > MAX_TOOL_CALLS_PER_DECISION:
+                    step += 1
+                    with self.db:
+                        self._event(turn.id, "model.completed", step=step, generation=turn.generation,
+                                    tool_count=count, discarded=True)
+                        self._advance(turn, step, "model", current)
+                    if overflowed:
+                        raise ModelError("Model returned too many tools in one decision")
+                    overflowed = True
+                    continue
+                overflowed = False
+                current.append(assistant)
                 step += 1
                 phase = "tools" if count else "model"
                 with self.db:

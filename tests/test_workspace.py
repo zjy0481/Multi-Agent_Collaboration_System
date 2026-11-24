@@ -91,7 +91,10 @@ def test_workspace_acl_assistant_versions_and_search(tmp_path):
         assert excerpt['content'] == 'ld'
         assert excerpt['text_range'] == {'start_char': 1, 'end_char': 3, 'total_chars': 3}
         for actor in (third, outsider):
-            assert not (await call(actor, 'read_artifact', version_id=old['version_id']))['ok']
+            denied = await call(actor, 'read_artifact', version_id=old['version_id'])
+            missing = await call(actor, 'read_artifact', version_id=uuid4().hex)
+            assert denied == missing and not denied['ok']
+            assert 'list_artifacts' in denied['error'] and 'publisher' in denied['error']
             before = len(sandbox.runs)
             assert not (await call(actor, 'run_command', command='cat', artifact_version_ids=[old['version_id']]))['ok']
             assert len(sandbox.runs) == before
@@ -113,6 +116,7 @@ def test_workspace_acl_assistant_versions_and_search(tmp_path):
         found = await call(qa, 'search_web', query='topic', limit=1)
         assert found['ok'] and len(requests) == 1
         record = found['result']
+        assert record['provider'] == 'searxng' and record['fallback_reason'] is None
         assert record['results'][0] == {'title': 'Example source', 'url': 'https://example.org/article',
                                         'snippet': 'Example excerpt', 'engine': 'fixture', 'result_id': 1}
         reloaded = WorkspaceService(db, teams, sandbox, tmp_path / 'artifacts', search)

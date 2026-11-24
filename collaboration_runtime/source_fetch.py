@@ -3,11 +3,37 @@ import hashlib
 from html.parser import HTMLParser
 import http.client
 import ipaddress
+import json
+import os
+from pathlib import Path
 import socket
 import ssl
+import subprocess
+import sys
 from urllib.parse import urldefrag, urljoin, urlsplit
 
+from .pdf_worker import MAX_PDF_BYTES, MAX_TEXT_CHARS
 from .search import SearchError
+
+
+class SourceHTTPError(SearchError):
+    def __init__(self, status_code):
+        self.status_code = status_code
+        super().__init__(f'Source returned HTTP {status_code}')
+
+
+def extract_pdf(content):
+    worker = Path(__file__).with_name('pdf_worker.py')
+    env = {name: os.environ[name] for name in ('SYSTEMROOT', 'WINDIR') if name in os.environ}
+    try:
+        result = subprocess.run([sys.executable, '-I', str(worker)], input=content, env=env,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5, check=True)
+        payload = json.loads(result.stdout)
+        if 'error' in payload:
+            raise SearchError(payload['error'])
+        return payload['text'], payload['truncated']
+    except (subprocess.SubprocessError, OSError, ValueError, KeyError):
+        raise SearchError('PDF extraction failed or exceeded time limit') from None
 
 
 class TextParser(HTMLParser):
@@ -59,7 +85,7 @@ def fetch_public_source(url):
                 target = parts.path or '/'
                 if parts.query:
                     target += '?' + parts.query
-                connection.request('GET', target, headers={'Accept': 'text/html,text/plain', 'User-Agent': 'CourseCollaboration/1.0'})
+                connection.request('GET', target, headers={'Accept': 'text/html,text/plain,application/pdf', 'User-Agent': 'CourseCollaboration/1.0'})
                 response = connection.getresponse()
                 if response.status in (301, 302, 303, 307, 308):
                     location = response.getheader('Location')
@@ -74,21 +100,26 @@ def fetch_public_source(url):
                     current = next_url
                     continue
                 if response.status != 200:
-                    raise SearchError(f'Source returned HTTP {response.status}')
+                    raise SourceHTTPError(response.status)
                 kind = response.getheader('Content-Type', '').split(';')[0].strip().lower()
-                if kind not in {'text/html', 'text/plain'}:
+                if kind not in {'text/html', 'text/plain', 'application/pdf'}:
                     raise SearchError('Source content type is not supported')
-                content = response.read(1_000_001)
-                if len(content) > 1_000_000:
+                limit = MAX_PDF_BYTES if kind == 'application/pdf' else 1_000_000
+                content = response.read(limit + 1)
+                if len(content) > limit:
                     raise SearchError('Source response exceeds size limit')
-                decoded = content.decode('utf-8', errors='replace')
-                if kind == 'text/html':
-                    parser = TextParser()
-                    parser.feed(decoded)
-                    decoded = '\n'.join(parser.parts)
-                text = decoded[:40000]
+                if kind == 'application/pdf':
+                    text, truncated = extract_pdf(content)
+                else:
+                    decoded = content.decode('utf-8', errors='replace')
+                    if kind == 'text/html':
+                        parser = TextParser()
+                        parser.feed(decoded)
+                        decoded = '\n'.join(parser.parts)
+                    text = decoded[:MAX_TEXT_CHARS]
+                    truncated = len(decoded) > len(text)
                 return {'url': url, 'final_url': current, 'redirect_chain': chain,
-                        'content_type': kind, 'text': text, 'truncated': len(decoded) > len(text),
+                        'content_type': kind, 'text': text, 'truncated': truncated,
                         'sha256': hashlib.sha256(content).hexdigest()}
             finally:
                 connection.close()

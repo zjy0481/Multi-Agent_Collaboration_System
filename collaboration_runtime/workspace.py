@@ -14,7 +14,7 @@ from .artifacts import ArtifactError, ArtifactNotFound, ArtifactStore
 from .sandbox import SandboxError
 from .validation_feedback import validation_feedback
 from .search import SearchError
-from .source_fetch import fetch_public_source
+from .source_fetch import SourceHTTPError, fetch_public_source
 
 
 class WorkspaceNotFound(Exception):
@@ -102,16 +102,18 @@ TOOLS = {
     "update_file": (WriteArgs, "Replace an existing UTF-8 file in your private workspace."),
     "delete_file": (PathArgs, "Delete a regular file in your private workspace."),
     "run_command": (CommandArgs, "Run a command or tests in your workspace. Pass exact artifact version IDs to import them read-only. "
+                    "The sandbox has no external network. Use Python urllib.request for local HTTP tests. "
                     "Set measure_timings only when diagnosing sandbox latency."),
     "list_workspace_readers": (ToolArgs, "List eligible participants for your artifact publication."),
     "publish_artifact": (PublishArgs, "Publish a file snapshot to explicitly named readers. An artifact ID publishes the next version."),
     "list_artifacts": (ToolArgs, "List artifact versions you are authorized to read."),
     "read_artifact": (ReadArtifactArgs, "Read an authorized UTF-8 version and get its read-only mount path. "
                       "Use max_chars and start_char for an excerpt."),
-    "search_web": (SearchArgs, "Search the host-configured retrieval source and record URLs and excerpts."),
+    "search_web": (SearchArgs, "Search the web and save URLs and excerpts. Check the provider and any fallback reason."),
     "get_search_result": (SearchResultArgs, "Retrieve a search record made by this execution session."),
     "read_source": (SourceArgs, "Record evidence from a search result by result_id (1-based) or exact URL. "
-                    "Optional max_chars limits the returned excerpt; the full captured text is still recorded."),
+                    "Supports accessible HTML, text and text-based PDFs. If a site rejects access, use a different "
+                    "public result. Search excerpts are leads. max_chars limits the returned excerpt."),
     "get_source": (SourceRecordArgs, "Retrieve recorded source text and provenance. Use max_chars and start_char for an excerpt."),
 }
 
@@ -148,15 +150,23 @@ class WorkspaceService:
                 session_id TEXT NOT NULL,
                 scope_id TEXT,
                 query TEXT NOT NULL,
-                results TEXT NOT NULL
+                results TEXT NOT NULL,
+                upstream_status TEXT NOT NULL DEFAULT 'ok',
+                provider TEXT,
+                fallback_reason TEXT
             );
             CREATE TABLE IF NOT EXISTS workspace_sources (
                 source_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, session_id TEXT NOT NULL,
                 scope_id TEXT, data TEXT NOT NULL
             );
         """)
-        if 'upstream_status' not in {row['name'] for row in self.db.execute('PRAGMA table_info(workspace_searches)')}:
+        columns = {row['name'] for row in self.db.execute('PRAGMA table_info(workspace_searches)')}
+        if 'upstream_status' not in columns:
             self.db.execute("ALTER TABLE workspace_searches ADD COLUMN upstream_status TEXT NOT NULL DEFAULT 'ok'")
+        if 'provider' not in columns:
+            self.db.execute("ALTER TABLE workspace_searches ADD COLUMN provider TEXT")
+        if 'fallback_reason' not in columns:
+            self.db.execute("ALTER TABLE workspace_searches ADD COLUMN fallback_reason TEXT")
 
     def _member_actor(self, session_id: str) -> Actor | None:
         member = self.teams.session(session_id)
@@ -306,6 +316,22 @@ class WorkspaceService:
             return {"ok": False, "error": error, "errors": validation_feedback(exc, TOOLS[name][0])}
         except UnicodeError:
             return {"ok": False, "error": "This tool requires UTF-8 text; use a read-only artifact mount for binary files"}
+        except ArtifactNotFound as exc:
+            if name in {"read_artifact", "run_command"}:
+                return {"ok": False, "error": (
+                    "Artifact version not found. Check the ID with list_artifacts. Ask an authorized publisher "
+                    "to use publish_artifact with your session in reader_session_ids and send you the new version_id. "
+                    "If you are an assistant, ask your parent to hand the version off to you."
+                )}
+            return {"ok": False, "error": str(exc)}
+        except SourceHTTPError as exc:
+            result = {"ok": False, "error": str(exc), "status": exc.status_code}
+            if exc.status_code in {202, 401, 403, 404, 406, 410}:
+                result["next_action"] = (
+                    "Try a different accessible public source with read_source. Use a search excerpt as a lead "
+                    "and mark any claim you cannot verify."
+                )
+            return result
         except (WorkspaceNotFound, ArtifactError, SearchError, SandboxError) as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -385,26 +411,32 @@ class WorkspaceService:
 
     async def _search(self, actor: Actor, query: str, limit: int):
         if self.search is None:
-            raise SearchError("Search is not configured on the host")
+            raise SearchError("Search is not configured on the host. Set EXA_API_KEY or COURSE_SEARCH_URL and restart the host.")
         results = await self.search.search(query, limit)
         self.actor(actor.session_id)
         search_id = uuid4().hex
+        upstream_status = "degraded" if getattr(results, "degraded", False) else "ok"
+        provider = getattr(results, "provider", None)
+        fallback_reason = getattr(results, "fallback_reason", None)
         with self.db:
             self.db.execute(
-                "INSERT INTO workspace_searches (search_id, team_id, session_id, scope_id, query, results, upstream_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (search_id, actor.team_id, actor.session_id, actor.scope_id, query, json.dumps(results, ensure_ascii=False),
-                 'degraded' if getattr(results, 'degraded', False) else 'ok'),
+                """INSERT INTO workspace_searches
+                   (search_id, team_id, session_id, scope_id, query, results, upstream_status, provider, fallback_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (search_id, actor.team_id, actor.session_id, actor.scope_id, query,
+                 json.dumps(results, ensure_ascii=False), upstream_status, provider, fallback_reason),
             )
         return {"search_id": search_id, "query": query, "results": [{**item, "result_id": i} for i, item in enumerate(results, 1)],
-                "upstream_status": "degraded" if getattr(results, "degraded", False) else "ok"}
+                "upstream_status": upstream_status, "provider": provider, "fallback_reason": fallback_reason}
 
     def _search_record(self, actor: Actor, search_id: str):
         row = self.db.execute(
-            """SELECT query, results, upstream_status FROM workspace_searches
+            """SELECT query, results, upstream_status, provider, fallback_reason FROM workspace_searches
                WHERE search_id = ? AND team_id = ? AND session_id = ? AND scope_id IS ?""",
             (search_id, actor.team_id, actor.session_id, actor.scope_id),
         ).fetchone()
         if row is None:
             raise WorkspaceNotFound("Search record not found")
         return {"search_id": search_id, "query": row["query"], "results": [{**item, "result_id": i} for i, item in enumerate(json.loads(row["results"]), 1)],
-                "upstream_status": row["upstream_status"]}
+                "upstream_status": row["upstream_status"], "provider": row["provider"],
+                "fallback_reason": row["fallback_reason"]}
