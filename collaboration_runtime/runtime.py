@@ -398,7 +398,7 @@ class Runtime:
                 goal_id, history_scope = self.collaboration.goal_scope_for_message(actor.team_id, message["id"])
                 if fork_message_id is not None:
                     history_scope = {fork_message_id, message["id"]}
-                elif history_scope is None and message["kind"] == "assignment":
+                elif history_scope is None and (message["kind"] == "assignment" or delivery["purpose"] == "goal.terminal"):
                     history_scope = {message["id"]}
             version_ids = check_scope()
             trimmed_history = False
@@ -688,7 +688,7 @@ class Runtime:
             return self.experience_tools.execute(role, name, arguments)
         if workspace_id is not None and self.collaboration is not None and self.collaboration.handles(name):
             work = None
-            if scheduled and name == "ask_human":
+            if scheduled and name in {"ask_human", "send_message"}:
                 work = self.db.execute("""
                     SELECT d.message_id FROM scheduled_turns s JOIN message_deliveries d
                         USING (event_id, session_id, purpose) WHERE s.turn_id = ?

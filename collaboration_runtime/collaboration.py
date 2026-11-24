@@ -579,7 +579,9 @@ class CollaborationService:
                     == "completed"
                     for goal_id in prerequisites
                 )
-                status = "queued" if active or not prerequisites_ready else "active"
+                earlier_eligible = (not active and self.goal_lifecycle is not None
+                                    and self.goal_lifecycle.next_eligible_queued_goal(team_id) is not None)
+                status = "queued" if active or earlier_eligible or not prerequisites_ready else "active"
                 goal_id = uuid4().hex
                 seq = self._event(team_id, "goal.registered", goal_id)
                 self.db.execute("""

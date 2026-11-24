@@ -500,6 +500,19 @@ class GoalLifecycle:
         """, (goal_id,))
         return all(row["status"] == "completed" for row in rows)
 
+    def next_eligible_queued_goal(self, team_id):
+        if self.db.execute(
+            "SELECT 1 FROM team_goals WHERE team_id = ? AND status = 'active'", (team_id,),
+        ).fetchone():
+            return None
+        rows = self.db.execute("""
+            SELECT id, revision FROM team_goals WHERE team_id = ? AND status = 'queued' ORDER BY seq
+        """, (team_id,))
+        for row in rows:
+            if self.prerequisites_completed(row["id"]):
+                return {"goal_id": row["id"], "expected_revision": row["revision"]}
+        return None
+
     def update_acceptance(self, team_id, actor, goal_id, body: AcceptanceUpdateInput):
         key = (team_id, actor.id, "update_goal_acceptance", body.request_id)
         payload = body.model_dump(exclude={"request_id"})

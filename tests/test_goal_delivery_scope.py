@@ -118,3 +118,65 @@ def test_conflicting_reply_and_current_work_goal_are_rejected(tmp_path):
         assert result['ok'] is False and result['status'] == 422
         result = client.portal.call(execute, first_goal['goal_id'], second['message_id'])
         assert result['ok'] is False and result['status'] == 422
+
+
+def test_scheduled_send_message_inherits_goal_and_is_cancelled(tmp_path):
+    import json
+
+    class Model:
+        sent = False
+        recipient = None
+
+        async def complete(self, messages, tools):
+            if not self.sent:
+                self.sent = True
+                return {'role': 'assistant', 'content': None, 'tool_calls': [{
+                    'id': 'send', 'type': 'function', 'function': {
+                        'name': 'send_message', 'arguments': json.dumps({
+                            'request_id': key(), 'text': 'Scheduled progress',
+                            'mentions': [self.recipient],
+                        }),
+                    },
+                }]}
+            return {'role': 'assistant', 'content': 'finished'}
+
+    model = Model()
+    application = create_app(model=model, sandbox=Sandbox(), state_dir=tmp_path,
+                             bootstrap=bootstrap, operator_token=OPERATOR, schedule=False)
+    with TestClient(application) as client:
+        base, lead, members, tokens = setup_team(client)
+        model.recipient = members[0]['member_id']
+        state = client.app.state
+        scheduler = DeliveryScheduler(state.runtime, state.collaboration, state.workspace)
+        first = assignment(client, base, 'First goal')
+        registered = goal(client, base, tokens[lead['member_id']], first)
+
+        async def run_first():
+            item = scheduler._claim_one()
+            assert item[0] == lead['session_id']
+            state.runtime.launch(*item)
+            await state.runtime.active[item[0]].task
+
+        client.portal.call(run_first)
+
+        def inspect():
+            db = state.collaboration.db
+            row = db.execute('SELECT id, team_id FROM team_messages WHERE text=?',
+                             ('Scheduled progress',)).fetchone()
+            assert row is not None
+            status = db.execute('SELECT status FROM message_deliveries WHERE message_id=?',
+                                (row['id'],)).fetchone()['status']
+            return row['id'], state.collaboration.goal_for_message(row['team_id'], row['id']), status
+
+        message_id, scope, status = client.portal.call(inspect)
+        assert scope == registered['goal_id']
+        assert status == 'pending'
+        second = assignment(client, base, 'Second goal')
+        assert terminate(client, base, OPERATOR, registered['goal_id'], 1, 'cancelled').status_code == 201
+
+        def statuses():
+            return dict(state.collaboration.db.execute(
+                'SELECT message_id, status FROM message_deliveries WHERE message_id IN (?, ?)',
+                (message_id, second['message_id'])))
+
+        assert client.portal.call(statuses) == {message_id: 'cancelled', second['message_id']: 'pending'}

@@ -369,6 +369,9 @@ def test_queue_prerequisites_earliest_eligible_activation_and_open_scope_cleanup
         assert linked["status"] == "queued"
 
         assert terminate(client, base, OPERATOR, first["goal_id"], 1, "cancelled").status_code == 201
+        new = goal(client, base, lead_token, assignment(client, base, "Newly arrived"))
+        assert new["status"] == "queued"
+        assert activate(client, base, lead_token, new["goal_id"]).status_code == 409
         not_ready = activate(client, base, lead_token, linked["goal_id"])
         assert not_ready.status_code == 409
         with ThreadPoolExecutor(max_workers=2) as workers:
