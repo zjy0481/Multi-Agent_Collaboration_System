@@ -32,6 +32,8 @@ Versions = Annotated[list[ObjectId], Field(max_length=100)]
 class RequiredDeliveryInput(Command):
     name: Text
     task_id: ObjectId
+    expected_version_ids: Versions = Field(default_factory=list,
+        description="Optional exact versions that must occur in the current approved submission. Names are display text.")
 
 
 class AcceptanceUpdateInput(Command):
@@ -54,10 +56,14 @@ class TerminalInput(Command):
     reason: Text | None = None
     evidence: Notes = Field(default_factory=list)
     final_version_ids: Versions = Field(default_factory=list)
+    confirmation: str | None = Field(default=None, min_length=64, max_length=64,
+        description="Confirmation from get_goal.close_preview binding exact approvals.")
 
     @model_validator(mode="after")
     def valid_outcome(self):
-        if self.outcome == "completed" and not self.final_version_ids:
+        if self.confirmation and (self.outcome != "completed" or self.final_version_ids):
+            raise ValueError("Use a preview confirmation alone for a completed goal")
+        if self.outcome == "completed" and not (self.final_version_ids or self.confirmation):
             raise ValueError("A completed goal requires readable final versions")
         if self.outcome == "failed" and (self.reason is None or not self.evidence):
             raise ValueError("A failed goal requires a reason and evidence")
@@ -102,7 +108,7 @@ class GoalTool(Command):
 
 
 TOOLS = {
-    "get_goal": (GoalTool, "Read the current goal acceptance agreement, terminal fact and frozen evidence."),
+    "get_goal": (GoalTool, "Read the goal and, as Lead, its close_preview with approvals, blockers and confirmation."),
     "update_goal_acceptance": (
         UpdateGoalAcceptanceTool,
         "As Lead, publish a new required-delivery revision for an active goal.",
@@ -329,10 +335,9 @@ class GoalLifecycle:
             "goal_id": frozen["goal_id"],
             "source_message_id": frozen["source_message_id"],
             "acceptance_revision": frozen["acceptance_revision"],
-            "acceptance_required_deliveries": [
-                {key: item[key] for key in ("name", "task_id")}
-                for item in frozen.get("acceptance_required_deliveries", [])
-            ],
+            "acceptance_required_deliveries": self._visible_agreement(team_id, actor, {
+                "required_deliveries": frozen.get("acceptance_required_deliveries", []),
+            })["required_deliveries"],
             "required_deliveries": required,
             "effective_task_ids": frozen["effective_task_ids"],
             "accepted_task_ids": frozen["accepted_task_ids"],
@@ -360,14 +365,58 @@ class GoalLifecycle:
         team = self.collaboration.teams.get(team_id)
         return {
             **goal,
-            "acceptance": acceptance,
+            "acceptance": self._visible_agreement(team_id, actor, acceptance),
             "prerequisites": self._prerequisites(goal["id"]),
             "deadline_at": self._deadline(goal["id"]),
             "terminal": self._terminal_view(team, actor, terminal),
         }
 
+    def _visible_agreement(self, team_id, actor, agreement):
+        if agreement is None:
+            return None
+        items = []
+        for raw in agreement["required_deliveries"]:
+            item = dict(raw)
+            if "expected_version_ids" in item:
+                item["expected_version_ids"] = [v for v in item["expected_version_ids"]
+                                                if self._can_read_final_version(team_id, actor, v)]
+            items.append(item)
+        return {**agreement, "required_deliveries": items}
+
+    @staticmethod
+    def _edition_conflicts(item, fact):
+        approved = {v["version_id"] for v in fact["versions"]}
+        mismatch = set(item.get("expected_version_ids", [])) - approved
+        return [f"Expected {sorted(mismatch)}; approved {sorted(approved)}"] if mismatch else []
+
+    def _close_preview(self, team, goal, acceptance, scope):
+        actor = self._lead_principal(team)
+        team_id = team["team_id"]
+        blockers, approvals, ids = [], [], set()
+        deliveries = (acceptance or {}).get("required_deliveries", [])
+        for item in deliveries:
+            task_id = item["task_id"]
+            fact = self.delegation.results.current_acceptance(team_id, actor, goal["id"], task_id)
+            if fact is None:
+                blockers.append({"task_id": task_id, "reason": "Current readable acceptance required; check with the owner"})
+                continue
+            task = self.delegation._task(team_id, task_id)
+            conflicts = self._edition_conflicts(item, fact)
+            conflicts.extend(self.delegation.results.evidence_conflicts(task, fact, actor))
+            blockers.extend({"task_id": task_id, "reason": conflict} for conflict in conflicts)
+            approvals.append({"task_id": task_id, "submission_id": fact["id"], "review_id": fact["review"]["id"],
+                              "versions": fact["versions"]})
+            ids.update(v["version_id"] for v in fact["versions"])
+        if not deliveries:
+            blockers.append({"reason": "Goal acceptance has no required deliverables"})
+        if any(not q["answer_message_id"] and not q["closed_at"] for q in scope["questions"]):
+            blockers.append({"reason": "Related human questions remain open"})
+        confirmation = None if blockers else self.collaboration._digest(
+            {"goal_id": goal["id"], "revision": acceptance["revision"], "approvals": approvals})
+        return {"approvals": approvals, "final_version_ids": sorted(ids), "blockers": blockers, "confirmation": confirmation}
+
     def get_goal(self, team_id, actor, goal_id):
-        self.collaboration.team(team_id, actor)
+        team = self.collaboration.team(team_id, actor)
         row = self._goal_row(team_id, actor, goal_id)
         enriched = self.enrich_goal(team_id, actor, dict(row))
         return {
@@ -377,6 +426,9 @@ class GoalLifecycle:
             "prerequisites": enriched["prerequisites"],
             "deadline_at": enriched["deadline_at"],
             "terminal": enriched["terminal"],
+            **({"close_preview": self._close_preview(team, row, enriched["acceptance"],
+                    self._scope_objects(team_id, goal_id, row["source_message_id"]))}
+               if self._is_lead(team, actor) and row["status"] == "active" else {}),
         }
 
     def get_acceptance(self, team_id, actor, goal_id, revision=None):
@@ -385,7 +437,7 @@ class GoalLifecycle:
         acceptance = self._acceptance(goal_id, revision)
         if acceptance is None:
             raise TeamNotFound("Goal acceptance revision not found")
-        return acceptance
+        return self._visible_agreement(team_id, actor, acceptance)
 
     def assignment_lifecycle(self, team_id, actor, source_message_id):
         team = self.collaboration.team(team_id, actor)
@@ -451,6 +503,8 @@ class GoalLifecycle:
     def update_acceptance(self, team_id, actor, goal_id, body: AcceptanceUpdateInput):
         key = (team_id, actor.id, "update_goal_acceptance", body.request_id)
         payload = body.model_dump(exclude={"request_id"})
+        deliveries = [item.model_dump(exclude_defaults=True) for item in body.required_deliveries]
+        payload["required_deliveries"] = deliveries
         digest = self.collaboration._digest({"goal_id": goal_id, **payload})
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
@@ -472,9 +526,16 @@ class GoalLifecycle:
                     raise CollaborationInvalid("A required delivery task is not visible to the Lead") from exc
                 if task["goal_id"] != goal_id:
                     raise CollaborationInvalid("A required delivery must belong to this goal")
+                if any(not self._can_read_final_version(team_id, actor, v) for v in item.expected_version_ids):
+                    raise TeamNotFound("Declared acceptance version unavailable")
+                fact = self.delegation.results.current_acceptance(team_id, actor, goal_id, item.task_id)
+                if fact:
+                    mismatches = self._edition_conflicts(item.model_dump(), fact)
+                    if mismatches:
+                        raise TeamConflict("; ".join(mismatches))
             revision = row["revision"] + 1
             record = {
-                "required_deliveries": [item.model_dump() for item in body.required_deliveries],
+                "required_deliveries": deliveries,
                 "created_at": _now(),
                 "created_by": actor.id,
             }
@@ -797,7 +858,14 @@ class GoalLifecycle:
             for version in (item.get("versions") or [])
         }
         if not required_versions <= set(final_version_ids):
-            raise TeamConflict("Final versions must include every currently accepted required deliverable")
+            lead = self._lead_principal(team)
+            missing = [v for item in frozen["required_deliveries"] for v in item["versions"]
+                       if v["version_id"] not in final_version_ids
+                       and self._can_read_final_version(team["team_id"], lead, v["version_id"])]
+            families = {v["artifact_id"] for v in missing}
+            other_editions = [v["version_id"] for v in frozen["final_versions"] if v["artifact_id"] in families]
+            raise TeamConflict(f"Missing approved final versions: {[v['version_id'] for v in missing]}; "
+                               f"other supplied editions: {other_editions}. Check get_goal.close_preview")
         for version_id in final_version_ids:
             try:
                 self.delegation.artifacts.resolve(team["team_id"], self._lead_principal(team).session_id, version_id)
@@ -821,6 +889,8 @@ class GoalLifecycle:
     def terminate_goal(self, team_id, actor, goal_id, body: TerminalInput, *, close_call=None):
         key = (team_id, actor.id, "terminate_goal", body.request_id)
         payload = body.model_dump(exclude={"request_id"})
+        if body.confirmation is None:
+            payload.pop("confirmation")
         payload["final_version_ids"] = sorted(set(payload["final_version_ids"]))
         digest = self.collaboration._digest({"goal_id": goal_id, **payload})
         with self.db:
@@ -847,6 +917,17 @@ class GoalLifecycle:
             reason = body.reason or ("用户主动终止" if body.outcome == "cancelled" else "必需交付已通过")
             evidence = body.evidence
             final_version_ids = sorted(set(body.final_version_ids))
+            if body.outcome == "completed":
+                preview = self._close_preview(team, goal, acceptance, scope)
+                if preview["blockers"]:
+                    raise TeamConflict("; ".join(b["reason"] for b in preview["blockers"]))
+                if body.confirmation:
+                    if body.confirmation != preview["confirmation"]:
+                        raise TeamConflict("Approvals changed; obtain a fresh close preview")
+                    final_version_ids = preview["final_version_ids"]
+            for vid in final_version_ids:
+                if not self._can_read_final_version(team_id, self._lead_principal(team), vid):
+                    raise TeamNotFound("Final version is not readable")
             frozen = self._freeze(team, dict(goal), acceptance, evidence, final_version_ids, scope)
             if body.outcome == "completed":
                 self._validate_completed(team, acceptance, frozen, scope, final_version_ids)

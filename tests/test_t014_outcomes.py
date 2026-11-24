@@ -47,10 +47,11 @@ class ScheduledOutcomesModel:
         return {"role": "assistant", "content": None, "tool_calls": calls}
 
 
-def reviewed_output(client, base, tokens, task_id, owner, reviewer, version, outcome="approved"):
+def reviewed_output(client, base, tokens, task_id, owner, reviewer, version, outcome="approved", revision=1):
     task_url = f"{base}/tasks/{task_id}"
-    delivered = ok(submit(client, task_url, tokens[owner["member_id"]], submission(version)))
-    return ok(review(client, task_url, tokens[reviewer["member_id"]], delivered["submission_id"], decision(outcome)))
+    delivered = ok(submit(client, task_url, tokens[owner["member_id"]], submission(version, revision)))
+    return ok(review(client, task_url, tokens[reviewer["member_id"]], delivered["submission_id"],
+                     decision(outcome, revision=revision)))
 
 
 def test_scheduled_queue_rework_and_reports_from_the_same_assignments(tmp_path):
@@ -102,12 +103,14 @@ def test_scheduled_queue_rework_and_reports_from_the_same_assignments(tmp_path):
         independent = register(client, base, lead_id, tokens, second_id, terms(
             reviewer["member_id"], lead_id, deliverables=["Independent result"],
         ))
+        original = reviewed_output(client, base, tokens, upstream, owner, reviewer, first_version)
         for task in (dependent, independent):
             material = publish(client, base, reviewer, [lead], task.encode())
             reviewed_output(client, base, tokens, task, reviewer, lead, material)
-        returned = reviewed_output(client, base, tokens, upstream, owner, reviewer, first_version, "returned")
+        register(client, base, lead_id, tokens, second_id, upstream_terms, task_id=upstream, base_revision=1)
+        returned = reviewed_output(client, base, tokens, upstream, owner, reviewer, first_version, "returned", revision=2)
         replacement = publish(client, base, owner, [lead, reviewer], b"reworked input", first_version["artifact_id"])
-        approved = reviewed_output(client, base, tokens, upstream, owner, reviewer, replacement)
+        approved = reviewed_output(client, base, tokens, upstream, owner, reviewer, replacement, revision=2)
         draft = create(client, base, lead_token, second_id, upstream_terms)
         assert ok(client.get(f"{base}/tasks/{dependent}", headers=auth(lead_token)))["status"] == "needs_recheck"
         assert ok(client.get(f"{base}/tasks/{independent}", headers=auth(lead_token)))["status"] == "accepted"
@@ -131,7 +134,7 @@ def test_scheduled_queue_rework_and_reports_from_the_same_assignments(tmp_path):
         assert set(failed["accepted_task_ids"]) == {upstream, independent}
         assert draft["proposal_id"] not in failed["task_ids"]
         assert [item["review_id"] for item in failed["references"]["reviews"] if item["task_id"] == upstream] == [
-            returned["review_id"], approved["review_id"],
+            original["review_id"], returned["review_id"], approved["review_id"],
         ]
         assert failed["human_waits"] == []
         assert cancelled["terminal"]["terminal_id"] == before["terminal_id"]
