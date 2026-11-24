@@ -328,6 +328,15 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     async def get_message(team_id: str, message_id: str, actor: Identity):
         return app.state.collaboration.get_message(team_id, actor, message_id)
 
+    @app.get("/v1/teams/{team_id}/messages/{message_id}/deliveries")
+    async def delivery_status(team_id: str, message_id: str, actor: Identity):
+        message = app.state.collaboration.get_message(team_id, actor, message_id)
+        if not actor.is_operator and actor.id != message["sender_id"]:
+            raise CollaborationForbidden("Only the sender or an authorized operator can inspect deliveries")
+        return [dict(row) for row in app.state.runtime.db.execute(
+            "SELECT session_id, purpose, status FROM message_deliveries WHERE message_id = ? ORDER BY session_id, purpose",
+            (message_id,))]
+
     @app.get("/v1/teams/{team_id}/deliveries")
     async def pending_deliveries(team_id: str, actor: Identity):
         return app.state.collaboration.pending_deliveries(team_id, actor)

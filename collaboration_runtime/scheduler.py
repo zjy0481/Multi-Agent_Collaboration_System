@@ -64,9 +64,9 @@ class DeliveryScheduler:
                   )
                 ORDER BY CASE WHEN t.status = 'recoverable' THEN 0
                               WHEN m.kind = 'assignment' THEN 1
-                              WHEN d.purpose = 'task.submitted' THEN 2
-                              WHEN d.purpose IN ('task.assigned', 'task.updated', 'task.ready', 'task.returned',
-                                                 'clarification.resume', 'clarification.correction') THEN 3
+                              WHEN m.kind = 'supplement' OR d.purpose IN (
+                                  'task.submitted', 'task.approved', 'clarification.resume', 'clarification.correction') THEN 2
+                              WHEN d.purpose IN ('task.assigned', 'task.updated', 'task.ready', 'task.returned') THEN 3
                               ELSE 4 END, d.event_id
             ''').fetchall()
             for row in candidates:
