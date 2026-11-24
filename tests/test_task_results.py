@@ -56,7 +56,9 @@ def test_return_resubmit_and_invalidate_only_pinned_input(tmp_path):
         task = f'{base}/tasks/{upstream}'
         v1 = publish(client, base, owner, [lead, reviewer], b'old content')
         v2 = publish(client, base, owner, [lead, reviewer], b'revised content', v1['artifact_id'])
-        pinned = terms(reviewer_id, lead_id, input_version_ids=[v1['version_id']], dependency_ids=[upstream])
+        # This consumer works from an explicitly pinned candidate before its review.
+        # Formal approval dependencies are covered separately in test_dependency_readiness.
+        pinned = terms(reviewer_id, lead_id, input_version_ids=[v1['version_id']])
         downstream = register(client, base, lead_id, tokens, goal, pinned)
         independent = register(client, base, lead_id, tokens, goal, terms(reviewer_id, lead_id))
         for task_id in (downstream, independent):

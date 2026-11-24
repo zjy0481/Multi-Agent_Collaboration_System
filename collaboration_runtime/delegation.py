@@ -29,11 +29,17 @@ class TaskTerms(Command):
     input_version_ids: Members = Field(default_factory=list)
     dependency_ids: Members = Field(default_factory=list)
     parent_task_id: ObjectId | None = None
+    output_grants: dict[ObjectId, TermsList] = Field(default_factory=dict, max_length=100,
+        description="Members allowed to depend on named output paths. Existing artifact ACLs still apply.")
 
     def normalized(self):
         terms = self.model_dump()
         for field in ("commitment_ids", "input_version_ids", "dependency_ids"):
             terms[field] = sorted(set(terms[field]))
+        if self.output_grants:
+            terms["output_grants"] = {member: sorted(set(paths)) for member, paths in self.output_grants.items()}
+        else:
+            terms.pop("output_grants")
         return terms
 
 
@@ -299,6 +305,8 @@ class DelegationService:
             current = self._visible_proposal(actor.team_id, actor, record["id"], record["version"])
             return {"proposal": self._view(current)}
         context = {"task": self._view(record), **self.results.event_reference(actor, record)}
+        if event_type in {"task.assigned", "task.ready", "task.updated"}:
+            context.update(self.results.dependency_handoff(record, actor))
         if event_type == "task.submitted" and actor.id == record["terms"]["reviewer_id"]:
             reference = context.get("result_reference")
             current = self._task(actor.team_id, record["id"])
@@ -333,6 +341,8 @@ class DelegationService:
     def _validate_terms(self, team_id, actor, members, record):
         required = set(record["required_member_ids"])
         terms = record["terms"]
+        if not terms.get("output_grants", {}).keys() <= members.keys():
+            raise CollaborationInvalid("Output grants must identify formal team members")
         if not required <= members.keys():
             raise CollaborationInvalid("Commitments must identify formal team members")
         participants = [members[member_id] for member_id in sorted(required | {actor.id})]
@@ -378,13 +388,14 @@ class DelegationService:
             team = self.collaboration.teams.get(assistant.team_id)
             allowed_members = {member["member_id"] for member in team["members"]
                                if member["session_id"] in allowed_sessions}
-            if not self._parties(record["dispatcher_id"], record["terms"]) <= allowed_members:
+            intended = self._parties(record["dispatcher_id"], record["terms"]) | set(record["terms"].get("output_grants", {}))
+            if not intended <= allowed_members:
                 raise CollaborationForbidden("Draft commitments include a party outside the assistant grant")
 
     def _validate_links(self, team_id, participants, record):
         invisible_link = ("Linked task not found. Check the ID with list_delegation. Every commitment party "
-                          "must be able to read the linked task. Ask its dispatcher to coordinate access "
-                          "or revise the link and agree on an explicitly shared artifact version.")
+                          "needs task access or, for a dependency, an explicit output grant. "
+                          "Ask the dispatcher to coordinate the handoff.")
         for field in ("parent_task_id", "dependency_ids"):
             pending = list(self._links(record["terms"], field))
             for task_id in pending:
@@ -392,7 +403,9 @@ class DelegationService:
                     target = self._task(team_id, task_id)
                 except TeamNotFound:
                     raise TeamNotFound(invisible_link) from None
-                if any(not self._can_read(team_id, member, target) for member in participants):
+                grants = target["terms"].get("output_grants", {}) if field == "dependency_ids" else {}
+                if any(member.id not in grants and not self._can_read(team_id, member, target)
+                       for member in participants):
                     raise TeamNotFound(invisible_link)
                 if target["goal_id"] != record["goal_id"]:
                     raise CollaborationInvalid("Task links must stay within the same goal")
@@ -423,8 +436,9 @@ class DelegationService:
         changes = {}
         if base and self._can_read(team_id, actor, base) and self._can_read(team_id, actor, current):
             changes = {
-                key: {"before": value, "after": current["terms"][key]}
-                for key, value in base["terms"].items() if value != current["terms"][key]
+                key: {"before": base["terms"].get(key), "after": current["terms"].get(key)}
+                for key in base["terms"].keys() | current["terms"].keys()
+                if base["terms"].get(key) != current["terms"].get(key)
             }
         raise DelegationConflict("Task base revision changed", {
             "expected_revision": expected, "current_revision": current["revision"], "changes": changes,
@@ -603,6 +617,8 @@ class DelegationService:
         else:
             self.db.execute("UPDATE delegation_tasks SET revision = ? WHERE id = ?", (revision, task_id))
         self.db.execute("INSERT INTO delegation_revisions VALUES (?, ?, ?)", (task_id, revision, json.dumps(task)))
+        if terms["dependency_ids"] and self.results.status(task) == "ready":
+            self.results.mark_ready_notice(task)
         event_type = "task.assigned" if initial else "task.updated"
         event_id = self._emit(team_id, event_type, {**task, "status": self.results.status(task)})
         message_id = self._notify_task(team_id, actor, lead, members, task, source, event_id, event_type)

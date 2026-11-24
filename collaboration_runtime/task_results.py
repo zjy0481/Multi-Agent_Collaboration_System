@@ -23,6 +23,8 @@ class SubmitResultInput(Command):
     version_ids: Annotated[list[ObjectId], Field(min_length=1, max_length=100)]
     evidence: Evidence
     open_issues: Notes = Field(default_factory=list)
+    evidence_versions: dict[ObjectId, Annotated[list[ObjectId], Field(min_length=1, max_length=100)]] = Field(
+        default_factory=dict, max_length=100, description="Source tasks and exact output versions cited as evidence.")
 
 
 class ReviewFinding(Command):
@@ -59,6 +61,13 @@ class TaskResults:
                 submission_id TEXT PRIMARY KEY REFERENCES task_submissions(id),
                 data TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS task_dependency_basis (
+                submission_id TEXT PRIMARY KEY REFERENCES task_submissions(id), outputs TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS task_ready_notices (
+                task_id TEXT NOT NULL, revision INTEGER NOT NULL, basis TEXT NOT NULL,
+                PRIMARY KEY(task_id, revision, basis)
+            );
             CREATE TABLE IF NOT EXISTS task_superseded_versions (
                 task_id TEXT NOT NULL REFERENCES delegation_tasks(id),
                 version_id TEXT NOT NULL REFERENCES artifact_versions(version_id),
@@ -89,15 +98,67 @@ class TaskResults:
         """, (task["goal_id"], task["team_id"], task["id"]))
         return sorted(pinned.intersection(row["version_id"] for row in rows))
 
+    def visible_outputs(self, source, actor, versions):
+        grants = source["terms"].get("output_grants", {}).get(actor.id, [])
+        full = self.delegation._can_read(source["team_id"], actor, source)
+        return [v for v in versions if (full or v["source_path"] in grants)
+                and actor.session_id in self.artifacts.reference_readers(source["team_id"], v["version_id"])]
+
+    def dependency_handoff(self, task, actor):
+        outputs, blockers = {}, {}
+        for dependency in task["terms"]["dependency_ids"]:
+            source = self.delegation._task(task["team_id"], dependency)
+            paths = source["terms"].get("output_grants", {}).get(actor.id)
+            if paths is None and not self.delegation._can_read(task["team_id"], actor, source):
+                blockers[dependency] = "handoff_unavailable"
+                continue
+            fact = self.current_acceptance_fact(task["team_id"], task["goal_id"], dependency)
+            if fact:
+                visible = self.visible_outputs(source, actor, fact["versions"])
+                complete = (len(visible) == len(fact["versions"]) if paths is None
+                            else set(paths) <= {v["source_path"] for v in visible})
+                outputs[dependency] = sorted(v["version_id"] for v in visible
+                                             if paths is None or v["source_path"] in paths)
+                if not complete:
+                    blockers[dependency] = "publisher_action_required"
+            else:
+                blockers[dependency] = "awaiting_approval"
+        return {"dependency_outputs": outputs, "dependency_blockers": blockers}
+
+    def _owner_outputs(self, task):
+        if not task["terms"]["dependency_ids"]:
+            return {}
+        team = self.collaboration.teams.get(task["team_id"])
+        owner = next(m for m in team["members"] if m["member_id"] == task["terms"]["owner_id"])
+        actor = Principal(owner["member_id"], task["team_id"], owner["session_id"])
+        handoff = self.dependency_handoff(task, actor)
+        return {dep: versions for dep, versions in handoff["dependency_outputs"].items()
+                if dep not in handoff["dependency_blockers"]}
+
+    def _dependencies_ready(self, task, submission=None):
+        outputs = self._owner_outputs(task)
+        if set(task["terms"]["dependency_ids"]) != outputs.keys():
+            return False
+        if submission is not None:
+            basis = self.db.execute("SELECT outputs FROM task_dependency_basis WHERE submission_id=?",
+                                    (submission["id"],)).fetchone()
+            if basis and json.loads(basis["outputs"]) != outputs:
+                return False
+        return True
+
+    def mark_ready_notice(self, task):
+        basis = self.collaboration._digest(self._owner_outputs(task))
+        row = self.db.execute("INSERT OR IGNORE INTO task_ready_notices VALUES (?, ?, ?)",
+                              (task["id"], task["revision"], basis))
+        return bool(row.rowcount)
+
     def _status(self, task, latest, stale):
         if stale:
             return "needs_recheck"
+        if not self._dependencies_ready(task, latest):
+            return "waiting_dependencies" if latest is None else "needs_recheck"
         if latest is None:
-            if task["terms"]["dependency_ids"]:
-                satisfied = all(self.current_acceptance_fact(task["team_id"], task["goal_id"], dependency)
-                                for dependency in task["terms"]["dependency_ids"])
-                return "ready" if satisfied else "waiting_dependencies"
-            return task["status"]
+            return "ready" if task["terms"]["dependency_ids"] else task["status"]
         if latest["review"] is None:
             return "pending_review"
         return "accepted" if latest["review"]["decision"] == "approved" else "returned"
@@ -107,6 +168,11 @@ class TaskResults:
 
     def _can_read_versions(self, team_id, actor, submission):
         try:
+            for source_id, ids in submission.get("evidence_versions", {}).items():
+                source = self.delegation._task(team_id, source_id)
+                versions = [self.artifacts.reference(team_id, vid) for vid in ids]
+                if len(self.visible_outputs(source, actor, versions)) != len(ids):
+                    return False
             return all(actor.session_id in self.artifacts.reference_readers(team_id, version["version_id"])
                        for version in submission["versions"])
         except ArtifactNotFound:
@@ -143,10 +209,17 @@ class TaskResults:
         readable_reviews = {record["review"]["id"] for record in visible if record["review"] is not None}
         submissions = [record if record["previous_return_id"] in readable_reviews else {**record, "previous_return_id": None}
                        for record in visible if revision is None or record["task_revision"] == revision]
-        return {"status": status, "result": {"current_submission_id": current_id,
-                                              "stale_input_versions": [self._version_view(self.artifacts.reference(team_id, version_id))
-                                                                       for version_id in stale],
-                                              "submissions": submissions}}
+        access = "available" if current_id else "no_current_submission"
+        if latest and latest not in visible:
+            access = "publisher_action_required"
+        return {
+            "status": status, **self.dependency_handoff(task, actor),
+            "result": {
+                "current_submission_id": current_id, "access": access,
+                "stale_input_versions": [self._version_view(self.artifacts.reference(team_id, v)) for v in stale],
+                "submissions": submissions,
+            },
+        }
 
     def current_acceptance(self, team_id, actor, goal_id, task_id):
         """Return usable current acceptance or None; closure checks other blockers in its transaction."""
@@ -156,7 +229,7 @@ class TaskResults:
             if task["goal_id"] != goal_id or self._stale_inputs(task):
                 return None
             latest = self._latest(task_id, task["revision"])
-            if self._status(task, latest, []) != "accepted":
+            if self._status(task, latest, []) != "accepted" or not self._can_read_versions(team_id, actor, latest):
                 return None
             for version in latest["versions"]:
                 self.artifacts.resolve(team_id, actor.session_id, version["version_id"])
@@ -234,6 +307,23 @@ class TaskResults:
         return {**{key: version[key] for key in ("version_id", "artifact_id", "version", "source_path", "sha256")},
                 "download_url": f"/v1/artifacts/{version['artifact_id']}/versions/{version['version']}"}
 
+    def evidence_conflicts(self, task, submission, actor):
+        conflicts = []
+        for source_id, cited in submission.get("evidence_versions", {}).items():
+            source = self.delegation._task(task["team_id"], source_id)
+            current = self.current_acceptance_fact(task["team_id"], task["goal_id"], source_id)
+            if current is None:
+                conflicts.append("Evidence source needs current approval")
+                continue
+            missing = set(cited) - {v["version_id"] for v in current["versions"]}
+            if missing:
+                if self._can_read_versions(task["team_id"], actor, submission):
+                    visible = [v["version_id"] for v in self.visible_outputs(source, actor, current["versions"])]
+                    conflicts.append(f"Cited {sorted(missing)}; current approved versions {visible}")
+                else:
+                    conflicts.append("Evidence edition requires publisher action")
+        return conflicts
+
     def _submit(self, task, actor, members, lead, body):
         latest = self._latest(task["id"])
         review = latest["review"] if latest else None
@@ -256,12 +346,30 @@ class TaskResults:
                   "owner_id": actor.id, "created_at": _now(), "versions": versions, "event_id": event_id,
                   "evidence": body.evidence, "open_issues": body.open_issues,
                   "previous_return_id": review["id"] if review and review["decision"] == "returned" else None}
+        if body.evidence_versions:
+            for source_id in body.evidence_versions:
+                try:
+                    source = self.delegation._task(task["team_id"], source_id)
+                except TeamNotFound:
+                    raise TeamNotFound("Evidence source unavailable") from None
+                if source_id == task["id"] or source["goal_id"] != task["goal_id"]:
+                    raise TeamNotFound("Evidence source unavailable")
+            record["evidence_versions"] = body.evidence_versions
+            if not all(self._can_read_versions(task["team_id"], reader, record) for reader in (actor, members[reviewer_id])):
+                raise TeamNotFound("Evidence source unavailable")
         self.db.execute("INSERT INTO task_submissions VALUES (?, ?, ?, ?)",
                         (record["id"], task["id"], task["revision"], json.dumps(record)))
+        if task["terms"]["dependency_ids"]:
+            self.db.execute("INSERT INTO task_dependency_basis VALUES (?, ?)",
+                            (submission_id, json.dumps(self._owner_outputs(task), sort_keys=True)))
         notifications = self._notify(task, actor, members, (reviewer_id, lead, task["dispatcher_id"]),
                                      event_id, kind, "任务结果已提交")
         self._invalidate(task, previous_ids - new_ids)
-        return {"submission_id": record["id"], "event_id": event_id, "notification_message_ids": notifications}
+        receipt = {"submission_id": record["id"], "event_id": event_id, "notification_message_ids": notifications}
+        agreement = self.collaboration.goal_lifecycle._acceptance(task["goal_id"])
+        if agreement and any(item["task_id"] == task["id"] for item in agreement["required_deliveries"]):
+            receipt["handoff"] = "ready" if self._can_read_versions(task["team_id"], members[lead], record) else "lead_access_required"
+        return receipt
 
     def _review(self, task, actor, members, lead, submission_id, body):
         latest = self._latest(task["id"], task["revision"])
@@ -280,6 +388,10 @@ class TaskResults:
         elif not all_met or body.expected is not None or body.recheck_items:
             raise CollaborationInvalid("Approval requires all criteria to pass and no return instructions")
         approved = body.decision == "approved"
+        if approved:
+            conflicts = self.evidence_conflicts(task, latest, actor)
+            if conflicts:
+                raise TeamConflict("Evidence version mismatch: " + "; ".join(conflicts))
         kind = "task.approved" if approved else "task.returned"
         review_id = uuid4().hex
         event_id = self._event(task, "accepted" if approved else "returned", kind,
@@ -307,6 +419,8 @@ class TaskResults:
                         self.artifacts.resolve(task["team_id"], owner.session_id, version_id)
                 except ArtifactError:
                     continue
+                if not self.mark_ready_notice(downstream):
+                    continue
                 ready_event = self._event(downstream, "ready", "task.ready")
                 self._notify(downstream, actor, members, [owner.id], ready_event, "task.ready", "前置任务已通过，任务可以继续")
         return {"submission_id": submission_id, "review_id": record["id"], "event_id": event_id,
@@ -316,8 +430,10 @@ class TaskResults:
         reviewing = isinstance(body, ReviewResultInput)
         operation = "review_result" if reviewing else "submit_result"
         key = (team_id, actor.id, operation, body.request_id)
-        digest = self.collaboration._digest({"task_id": task_id, "submission_id": submission_id,
-                                             "body": body.model_dump(exclude={"request_id"})})
+        payload = body.model_dump(exclude={"request_id"})
+        if not payload.get("evidence_versions"):
+            payload.pop("evidence_versions", None)
+        digest = self.collaboration._digest({"task_id": task_id, "submission_id": submission_id, "body": payload})
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
             team = self.collaboration.team(team_id, actor)
@@ -338,6 +454,9 @@ class TaskResults:
                 raise TeamConflict("Task revision changed")
             if self._stale_inputs(task):
                 raise TeamConflict("Task inputs require rechecking before submitting or reviewing")
+            pending = self._latest(task_id, task["revision"]) if reviewing else None
+            if (not reviewing or body.decision == "approved") and not self._dependencies_ready(task, pending):
+                raise TeamConflict("Upstream dependencies need current approval and readable granted outputs")
             if reviewing:
                 receipt = self._review(task, actor, members, team["lead_member_id"], submission_id, body)
             else:
