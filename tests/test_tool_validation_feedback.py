@@ -35,8 +35,13 @@ def test_validation_feedback_is_bounded_and_value_free():
     assert "secret" not in json.dumps(malformed)
 
 
-def test_compact_opt_in_preserves_legacy():
+def test_compact_inference_preserves_legacy_and_explicit_modes():
     tool = DelegationTools(Service(), Auth(), None)
     assert tool.execute("session", "list_delegation", "{}")['result'] == {"legacy": True, "active_goals": []}
     assert tool.execute("session", "list_delegation", '{"compact": true, "limit": 3}')['result']['limit'] == 3
-    assert tool.execute("session", "list_delegation", '{"limit": 50}')['status'] == 422
+    assert tool.execute("session", "list_delegation", '{"limit": 3}')['result'] == {"goal_id": None, "limit": 3}
+    assert tool.execute("session", "list_delegation", '{"goal_id": "goal"}')['result'] == {"goal_id": "goal", "limit": 50}
+    assert tool.execute("session", "list_delegation", '{"goal_id": null}')['result'] == {"goal_id": None, "limit": 50}
+    assert tool.execute("session", "list_delegation", '{"compact": false}')['result'] == {"legacy": True, "active_goals": []}
+    assert tool.execute("session", "list_delegation", '{"compact": false, "limit": 50}')['status'] == 422
+    assert tool.execute("session", "list_delegation", '{"compact": false, "goal_id": null}')['status'] == 422

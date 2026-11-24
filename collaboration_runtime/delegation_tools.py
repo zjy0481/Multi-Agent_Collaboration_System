@@ -50,7 +50,7 @@ class ListDelegationTool(Command):
 
 
 TOOLS = {
-    "create_proposal": (CreateProposalInput, "Open an initial negotiation or propose a revision to a task."),
+    "create_proposal": (CreateProposalInput, "Open an initial proposal with scope_id (no task_id or base_revision), or a revision with task_id and base_revision (no scope_id)."),
     "counter_proposal": (ProposalCounterTool, "Offer new terms for the current proposal version. This clears confirmations for the new version."),
     "confirm_proposal": (ProposalVersionTool, "Confirm the exact current proposal version as a required party."),
     "reject_proposal": (ProposalReasonTool, "Reject the current proposal version as a required party."),
@@ -61,7 +61,7 @@ TOOLS = {
     "get_task": (ReadTaskTool, "Read a task and its current or specified revision."),
     "submit_result": (SubmitResultTool, "As the current task owner, submit exact published version IDs and evidence for the expected revision."),
     "review_result": (ReviewResultTool, "As the designated reviewer, decide an exact pending submission. Provide evidence per 1-based acceptance criterion; a return needs expectations and recheck items."),
-    "list_delegation": (ListDelegationTool, "List visible goals, proposals and tasks. Use compact=true to find your next action; goal_id and limit filter compact results."),
+    "list_delegation": (ListDelegationTool, "List visible goals, proposals and tasks. When compact is omitted, goal_id or limit selects compact output."),
 }
 
 COMMAND_TYPES = {
@@ -117,10 +117,12 @@ class DelegationTools:
             elif name == "get_task":
                 result = self.service.get_task(actor.team_id, actor, args.task_id, args.revision)
             elif name == "list_delegation":
-                if args.compact:
+                filters_supplied = bool(args.model_fields_set.intersection({"goal_id", "limit"}))
+                compact = args.compact or ("compact" not in args.model_fields_set and filters_supplied)
+                if compact:
                     result = self.service.compact_snapshot(actor.team_id, actor, goal_id=args.goal_id, limit=args.limit)
                 else:
-                    if args.model_fields_set.intersection({"goal_id", "limit"}):
+                    if filters_supplied:
                         raise CollaborationInvalid("goal_id and limit require compact mode")
                     result = self.service.snapshot(actor.team_id, actor)
                     result["active_goals"] = self.service.active_goals(actor.team_id, actor)

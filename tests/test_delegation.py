@@ -104,6 +104,38 @@ def test_registration_replay_concurrency_and_notifications(tmp_path):
         assert any(item['message_id'] == receipt['notification_message_id'] for item in ok(client.get(f'{base}/deliveries', headers=auth(tokens[lead_id]))))
 
 
+def test_duplicate_scope_conflict_reports_only_visible_current_proposal(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens, goal = context(client)
+        owner, reviewer, outsider = others[:3]
+        payload = {'request_id': key(), 'goal_id': goal, 'scope_id': key(),
+                   'terms': terms(owner['member_id'], reviewer['member_id'])}
+        service = client.app.state.collaboration
+
+        def invoke(member, body):
+            return client.portal.call(service.execute_tool, member['session_id'], 'create_proposal', json.dumps(body))
+
+        original = invoke(lead, payload)
+        assert original['ok']
+        proposal_id = original['result']['proposal_id']
+        revised = ok(action(client, proposal_id, tokens[reviewer['member_id']], 'counter',
+                            terms=terms(owner['member_id'], reviewer['member_id'], deliverables=['revised'])))
+        assert revised['version'] == 2
+        assert invoke(lead, payload) == original
+        duplicate = {**payload, 'request_id': key()}
+        assert invoke(lead, duplicate) == {
+            'ok': False, 'error': 'Negotiation scope already has a proposal', 'status': 409,
+            'details': {'proposal_id': proposal_id, 'current_version': 2, 'proposal_status': 'open'},
+        }
+        response = client.post(f'{base}/proposals', headers=auth(tokens[lead['member_id']]), json=duplicate)
+        assert response.status_code == 409
+        assert response.json()['detail'] == {
+            'message': 'Negotiation scope already has a proposal',
+            'proposal_id': proposal_id, 'current_version': 2, 'proposal_status': 'open',
+        }
+        assert invoke(outsider, duplicate) == {'ok': False, 'error': 'Proposal not found', 'status': 404}
+
+
 def test_revision_staleness_and_changed_commitments(tmp_path):
     with TestClient(app(tmp_path)) as client:
         base, lead, others, tokens, goal = context(client)
@@ -180,6 +212,8 @@ def test_assistant_scope_and_direct_effects(tmp_path):
         result = invoke('create_proposal', payload)
         assert result['ok'], result
         proposal = result['result'].get('proposal_id', result['result'].get('id'))
+        duplicate = invoke('create_proposal', {**payload, 'request_id': key()})
+        assert duplicate['status'] == 409 and duplicate['details'] == {}
         for name in ('assign_task', 'confirm_proposal'):
             denied = invoke(name, {'request_id': key(), 'proposal_id': proposal, 'expected_version': 1})
             assert not denied['ok'] and denied['status'] == 403

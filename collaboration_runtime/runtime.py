@@ -122,7 +122,7 @@ class CloseGoalCall:
 
 
 class Runtime:
-    def __init__(self, model, sandbox, database: Path, max_steps: int = 12):
+    def __init__(self, model, sandbox, database: Path, max_steps: int = 20):
         self.model = model
         self._model_session_scope = str(Path(database).resolve())
         self.sandbox = sandbox

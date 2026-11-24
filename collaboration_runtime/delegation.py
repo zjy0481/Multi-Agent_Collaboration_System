@@ -468,8 +468,15 @@ class DelegationService:
                 SELECT id FROM delegation_proposals WHERE goal_id = ? AND scope_id = ? AND task_id IS NULL
             """, (body.goal_id, body.scope_id)).fetchone()
             if present:
-                self._visible_proposal(team_id, actor, present["id"])
-                raise DelegationConflict("Negotiation scope already has a proposal")
+                existing = self._visible_proposal(team_id, actor, present["id"])
+                details = None
+                if assistant is None:
+                    details = {
+                        "proposal_id": existing["id"],
+                        "current_version": existing["version"],
+                        "proposal_status": existing["status"],
+                    }
+                raise DelegationConflict("Negotiation scope already has a proposal", details)
             dispatcher = actor.id
         record = self._new_version(team_id, actor, lead, members, {
             "id": uuid4().hex, "team_id": team_id, "version": 1, "goal_id": body.goal_id, "task_id": body.task_id,
