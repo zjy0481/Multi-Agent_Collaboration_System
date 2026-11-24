@@ -18,7 +18,7 @@ from .workspace import WorkspaceNotFound
 logger = logging.getLogger(__name__)
 
 
-def _delivery_guidance(payload):
+def _delivery_guidance(payload, actor_id=None):
     """Give short, event-specific suggestions without making acceptance decisions."""
     purpose = payload['delivery']['purpose']
     if purpose == 'goal.terminal':
@@ -28,10 +28,25 @@ def _delivery_guidance(payload):
         return {'review': ('Use the task revision and submitted versions in this delivery. Review those versions against '
                            'the acceptance criteria and traceable evidence. Report a specific gap or decision for each '
                            'criterion. Read only the needed passages when the evidence locations are known.')}
-    if purpose in ('task.assigned', 'task.ready', 'task.returned'):
-        return {'delivery': ('Make the smallest version a reviewer can check. If an input is missing, share the specific '
-                             'blocker and continue independent work where possible. Use list_delegation with compact=true '
-                             'when you only need assignment or review status.')}
+    if purpose == 'message' and payload.get('message', {}).get('kind') == 'assignment':
+        return {'assignment': ('Register the goal and propose the smallest complete outcome a reviewer can check. '
+                               'Clarify blockers and start independent work before expanding the plan. '
+                               'Name one primary deliverable, its owner, reviewer and readers. '
+                               'Use output_grants and dependency_ids for work that consumes another task output. '
+                               'End this turn when waiting for confirmations.')}
+    if purpose == 'delegation.proposal' and payload.get('proposal_action'):
+        return {'proposal': (f"All parties confirmed the current open version. Call {payload['proposal_action']} "
+                             'with this proposal and exact version; yield the turn when waiting on others.')}
+    if purpose in ('task.assigned', 'task.ready', 'task.updated', 'task.returned'):
+        task = payload.get('task', {})
+        if actor_id is not None and task.get('terms', {}).get('owner_id') == actor_id:
+            return {'delivery': ('Make the smallest checkable version; report missing inputs and continue independent work. '
+                                 'Once a representative acceptance check passes, publish the exact result and evidence '
+                                 'to the required readers, then submit_result for this task and revision. '
+                                 'End this turn when waiting for review.')}
+    if purpose == 'task.approved' and payload.get('goal_close_ready'):
+        return {'closure': ('Use get_goal.close_preview; if still ready, call close_goal with its confirmation. '
+                            'Yield the turn while waiting on others.')}
     return None
 
 
@@ -107,7 +122,7 @@ class DeliveryScheduler:
                             payload['next_goal_activation'] = activation
                         if version_ids is not None:
                             self.runtime.fork_messages.add_delivery_versions(payload, fork_message_id, version_ids)
-                        guidance = _delivery_guidance(payload)
+                        guidance = _delivery_guidance(payload, principal.id)
                         if guidance is not None:
                             payload['platform_guidance'] = guidance
                         text = json.dumps(payload, ensure_ascii=False)

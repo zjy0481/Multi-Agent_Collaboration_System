@@ -302,11 +302,23 @@ class DelegationService:
         if record is None or not self._can_read(actor.team_id, actor, record):
             return None
         if event_type.startswith("proposal."):
-            current = self._visible_proposal(actor.team_id, actor, record["id"], record["version"])
-            return {"proposal": self._view(current)}
+            version = self._visible_proposal(actor.team_id, actor, record["id"], record["version"])
+            context = {"proposal": self._view(version)}
+            action = self._proposal_action(version, actor.id)
+            if action:
+                current = self._proposal(actor.team_id, record["id"])
+                if current["version"] == version["version"]:
+                    context["proposal_action"] = action
+            return context
         context = {"task": self._view(record), **self.results.event_reference(actor, record)}
         if event_type in {"task.assigned", "task.ready", "task.updated"}:
             context.update(self.results.dependency_handoff(record, actor))
+        if event_type == "task.approved" and self.collaboration.goal_lifecycle is not None:
+            team = self.collaboration.teams.get(actor.team_id)
+            if actor.id == team["lead_member_id"]:
+                goal = self.collaboration.goal_lifecycle.get_goal(actor.team_id, actor, record["goal_id"])
+                if goal.get("close_preview", {}).get("confirmation"):
+                    context["goal_close_ready"] = True
         if event_type == "task.submitted" and actor.id == record["terms"]["reviewer_id"]:
             reference = context.get("result_reference")
             current = self._task(actor.team_id, record["id"])
@@ -530,10 +542,22 @@ class DelegationService:
         return self._proposal_receipt(revised, event_id)
 
     @staticmethod
-    def _proposal_receipt(record, event_id):
+    def _proposal_action(record, actor_id):
+        if (record["status"] == "open" and record["proposer_id"] == actor_id
+                and set(record["required_member_ids"]) <= set(record["confirmation_ids"])):
+            return "assign_task" if record["task_id"] is None else "update_task"
+        return None
+
+    @staticmethod
+    def _proposal_receipt(record, event_id, *, actor_id=None):
         pending = set(record["required_member_ids"]) - set(record["confirmation_ids"])
-        return {"proposal_id": record["id"], "version": record["version"], "status": record["status"],
-                "pending_member_ids": sorted(pending), "event_id": event_id}
+        receipt = {"proposal_id": record["id"], "version": record["version"], "status": record["status"],
+                   "pending_member_ids": sorted(pending), "event_id": event_id}
+        if actor_id is not None:
+            action = DelegationService._proposal_action(record, actor_id)
+            if action:
+                receipt["proposal_action"] = action
+        return receipt
 
     def _notify_proposal(self, team_id, actor, members, event_id, record, recipient_ids):
         for member_id in sorted(set(recipient_ids) - {actor.id}):
@@ -548,12 +572,12 @@ class DelegationService:
         self._check_basis(team_id, actor, record["task_id"], record["base_revision"])
         existing = record["confirmation_events"].get(actor.id)
         if existing is not None:
-            return self._proposal_receipt(record, existing)
+            return self._proposal_receipt(record, existing, actor_id=actor.id)
         record["confirmation_ids"] = sorted({*record["confirmation_ids"], actor.id})
         event_id = self._emit(team_id, "proposal.confirmed", record)
         record["confirmation_events"][actor.id] = event_id
         self._save_version(record)
-        receipt = self._proposal_receipt(record, event_id)
+        receipt = self._proposal_receipt(record, event_id, actor_id=actor.id)
         if not receipt["pending_member_ids"]:
             self._notify_proposal(team_id, actor, members, event_id, record, [record["proposer_id"]])
         return receipt

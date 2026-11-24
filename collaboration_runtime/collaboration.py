@@ -51,6 +51,7 @@ class MemberMessageInput(MessageFields):
 class MessageInput(MessageFields):
     kind: Literal["chat", "progress", "assignment", "supplement"] = "chat"
     required_inputs: Annotated[list[RequiredInput], Field(default_factory=list, max_length=100)]
+    assignment_guidance: Annotated[str, StringConstraints(max_length=4000)] | None = None
 
 
 class GoalInput(Command):
@@ -132,6 +133,10 @@ class CollaborationService:
                 created_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS team_messages_order ON team_messages(team_id, seq);
+            CREATE TABLE IF NOT EXISTS assignment_guidance (
+                message_id TEXT PRIMARY KEY REFERENCES team_messages(id),
+                guidance TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS team_goals (
                 id TEXT PRIMARY KEY,
                 team_id TEXT NOT NULL REFERENCES teams(team_id),
@@ -365,6 +370,8 @@ class CollaborationService:
             digest_body.pop("required_inputs")
         if body.goal_id is None:
             digest_body.pop("goal_id")
+        if body.assignment_guidance is None:
+            digest_body.pop("assignment_guidance")
         digest = self._digest({**digest_body, "mentions": mentions})
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
@@ -428,6 +435,8 @@ class CollaborationService:
                 raise CollaborationForbidden("Only the user can submit assignments or supplements")
             if body.kind == "assignment" and (source or recipient not in {None, team["lead_member_id"]}):
                 raise CollaborationInvalid("An original assignment must be in the group or a private thread with the Lead")
+            if body.assignment_guidance is not None and (not actor.is_operator or body.kind != "assignment"):
+                raise CollaborationForbidden("Only the user can provide guidance on an assignment")
             if body.required_inputs and (not actor.is_operator or body.kind != "assignment"):
                 raise CollaborationForbidden("Only the user can declare required inputs on an assignment")
             if any(rule.owner_id not in members for rule in body.required_inputs):
@@ -437,6 +446,9 @@ class CollaborationService:
 
             receipt = self._create_message(team_id, actor, recipient=recipient, text=body.text,
                                            kind=body.kind, mentions=mentions, reply_to=body.reply_to)
+            if body.assignment_guidance is not None:
+                self.db.execute("INSERT INTO assignment_guidance VALUES (?, ?)",
+                                (receipt["message_id"], body.assignment_guidance))
             for rule in body.required_inputs:
                 for version_id in set(rule.version_ids):
                     self.db.execute("INSERT OR IGNORE INTO assignment_required_inputs VALUES (?, ?, ?)",
@@ -513,6 +525,13 @@ class CollaborationService:
         message = self.get_message(actor.team_id, actor, delivery["message_id"])
         self._add_delivery_answers(delivery)
         payload = {"delivery": delivery, "message": message}
+        if message["kind"] == "assignment" and message["sender_id"] == OPERATOR_ID:
+            guidance = self.db.execute("""
+                SELECT g.guidance FROM assignment_guidance g JOIN message_deliveries d ON d.message_id = g.message_id
+                WHERE d.message_id = ? AND d.session_id = ? AND d.event_id = ? AND d.purpose = ?
+            """, (message["id"], actor.session_id, delivery["event_id"], delivery["purpose"])).fetchone()
+            if guidance is not None:
+                payload["assignment_guidance"] = guidance["guidance"]
         goal_id = self.goal_for_message(actor.team_id, message["id"])
         if goal_id is not None:
             payload["goal_id"] = goal_id
