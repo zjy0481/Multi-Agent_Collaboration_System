@@ -1,4 +1,8 @@
 """Checked handoffs across author, reviewer, downstream owner and goal Lead."""
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+import json
+
 from fastapi.testclient import TestClient
 
 from test_collaboration import app, auth
@@ -75,5 +79,29 @@ def test_waiting_dependency_blocks_formal_submission(tmp_path):
         assert early.status_code == 409 and "dependenc" in early.text.lower()
         source = publish(client, base, owner, [qa, lead], b"source")
         sent = ok(submit(client, f"{base}/tasks/{up}", tokens[oid], submission(source)))
-        ok(review(client, f"{base}/tasks/{up}", tokens[qid], sent["submission_id"], decision()))
-        ok(submit(client, f"{base}/tasks/{down}", tokens[qid], request))
+        start = Barrier(2)
+        down_url = f"{base}/tasks/{down}"
+
+        def approve():
+            start.wait()
+            return ok(review(client, f"{base}/tasks/{up}", tokens[qid], sent["submission_id"], decision()))
+
+        def submit_when_ready():
+            start.wait()
+            return submit(client, down_url, tokens[qid], request)
+
+        with ThreadPoolExecutor(2) as workers:
+            approval_job = workers.submit(approve)
+            submission_job = workers.submit(submit_when_ready)
+            approval = approval_job.result()
+            attempt = submission_job.result()
+        if attempt.status_code == 409:
+            assert "dependenc" in attempt.text.lower()
+            attempt = submit(client, down_url, tokens[qid], request)
+        actual = ok(attempt)
+        assert actual["event_id"] > approval["event_id"]
+        assert ok(submit(client, down_url, tokens[qid], request)) == actual
+        db = client.app.state.runtime.db
+        basis = client.portal.call(lambda: db.execute(
+            "SELECT outputs FROM task_dependency_basis WHERE submission_id=?", (actual["submission_id"],)).fetchone()[0])
+        assert json.loads(basis) == {up: [source["version_id"]]}
