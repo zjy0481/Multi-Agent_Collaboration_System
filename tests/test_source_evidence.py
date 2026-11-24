@@ -13,11 +13,15 @@ from test_collaboration import Model, Sandbox, bootstrap, setup_team, OPERATOR
 
 
 def test_degraded_source_and_exact_session_provenance(tmp_path, monkeypatch):
-    transport = httpx.MockTransport(lambda request: httpx.Response(200, json={
-        'results': [{'url': 'https://public.example/paper', 'title': 'Paper', 'content': 'snippet'}],
-        'unresponsive_engines': [['brave', 'too many requests']],
-    }))
-    search = SearchClient('https://search.example/search', transport=transport)
+    def handler(request):
+        if request.url.host == 'api.exa.ai':
+            return httpx.Response(429)
+        return httpx.Response(200, json={
+            'results': [{'url': 'https://public.example/paper', 'title': 'Paper', 'content': 'snippet'}],
+            'unresponsive_engines': [['brave', 'too many requests']],
+        })
+
+    search = SearchClient('https://search.example/search', exa_api_key='test', transport=httpx.MockTransport(handler))
     monkeypatch.setattr('collaboration_runtime.workspace.fetch_public_source', lambda url: {
         'url': url, 'content_type': 'text/plain', 'text': 'original source', 'truncated': False, 'sha256': 'a' * 64,
     })
@@ -29,11 +33,12 @@ def test_degraded_source_and_exact_session_provenance(tmp_path, monkeypatch):
             return await application.state.workspace.execute(session, name, json.dumps(args))
         result = client.portal.call(execute, lead['session_id'], 'search_web', {'query': 'paper'})
         assert result['result']['upstream_status'] == 'degraded'
+        assert result['result']['provider'] == 'searxng'
+        assert result['result']['fallback_reason'] == 'Exa returned HTTP 429'
         search_id = result['result']['search_id']
         assert result['result']['results'][0]['result_id'] == 1
         saved = client.portal.call(execute, lead['session_id'], 'get_search_result', {'search_id': search_id})
-        assert saved['result']['upstream_status'] == 'degraded'
-        assert saved['result']['results'][0]['result_id'] == 1
+        assert saved == result
         selected = client.portal.call(execute, lead['session_id'], 'read_source',
                                       {'search_id': search_id, 'result_id': 1, 'max_chars': 8})
         assert selected['result']['url'] == 'https://public.example/paper'

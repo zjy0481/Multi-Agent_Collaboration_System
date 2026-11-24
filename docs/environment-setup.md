@@ -71,11 +71,11 @@ Remove-Item Env:RUN_DOCKER_TESTS
 
 ## 联网搜索与代理
 
-检索由 Windows 上的工作台宿主发起。宿主请求 `127.0.0.1:8888` 上的 SearXNG，SearXNG 再通过 `host.docker.internal:7897` 访问宿主的 HTTP 代理和上游搜索引擎。成员的执行容器继续使用 `--network none`。Docker Desktop 提供 `host.docker.internal`，供容器访问宿主服务。 [Docker Desktop 网络说明](https://docs.docker.com/desktop/features/networking/networking-how-tos/) · [沙箱实现](../collaboration_runtime/sandbox.py)
+检索由工作台宿主发起。宿主从进程环境读取 `EXA_API_KEY`，优先直连 Exa。若 Exa 超时、请求失败或未返回可用链接，并且配置了 `COURSE_SEARCH_URL`，则同一次工具调用回退到 SearXNG。只配置 SearXNG 时会直接使用它。备用容器可通过 `host.docker.internal:7897` 访问宿主代理。成员的执行容器使用 `--network none`。 [Exa Search API](https://exa.ai/docs/reference/search) · [Docker Desktop 网络说明](https://docs.docker.com/desktop/features/networking/networking-how-tos/) · [沙箱实现](../collaboration_runtime/sandbox.py)
 
-检索结果包含上游状态。`read_source` 可用结果编号或精确 URL 读取当前会话搜索记录中的公网 HTTPS 链接，支持 HTML 和纯文本。宿主最多跟随五次重定向，每跳重新校验并固定公网地址。证据保存原始 URL、最终 URL、跳转链、获取时间及内容哈希，可用 `get_source` 取回。
+`search_web` 和 `get_search_result` 返回实际提供者 `provider`、上游状态 `upstream_status` 和可能的回退原因 `fallback_reason`。回退或备用引擎部分不可用时，状态记为 `degraded`。`read_source` 可用结果编号或精确 URL 读取当前会话搜索记录中的公网 HTTPS 链接，支持 HTML 和纯文本。宿主最多跟随五次重定向，每跳重新校验并固定公网地址。证据保存原始 URL、最终 URL、跳转链、获取时间及内容哈希，可用 `get_source` 取回。
 
-### 验证 Windows 代理
+### 验证 SearXNG 使用的 Windows 代理
 
 先启动本机的代理客户端，确认 `7897` 是可用的 HTTP 代理端口。其他机器使用不同端口时，将本节示例中的 `7897` 替换为实际端口。命令返回 `Proxy CONNECT=200 HTTP=204` 时，说明代理可以建立 HTTPS 隧道并取得响应。
 
@@ -85,7 +85,7 @@ curl.exe --proxy 'http://127.0.0.1:7897' --max-time 15 --silent --show-error `
   'https://www.google.com/generate_204'
 ```
 
-### 启动 SearXNG
+### 启动备用 SearXNG
 
 首次部署时生成本机配置，启用 JSON 输出，并指定容器访问宿主代理的地址。以只监听 `127.0.0.1:8888` 的方式发布搜索服务。 [SearXNG 容器安装](https://docs.searxng.org/admin/installation-docker.html) · [SearXNG 出站代理](https://docs.searxng.org/admin/settings/settings_outgoing.html)
 
@@ -118,14 +118,25 @@ docker run -d --name collaboration-searxng -p 127.0.0.1:8888:8080 `
 
 ### 接入项目并验证检索
 
-在 `.env` 中填写本机端点。如果使用需要 Bearer 认证的获准检索服务，再填写 `COURSE_SEARCH_API_KEY`。修改配置后重启已运行的工作台。
+如果 Windows 已设置 `EXA_API_KEY`，在继承该变量的 PowerShell 中启动工作台。对于设置变量之前就已打开的 PowerShell，可将已保存的值加载到当前进程。以下命令不会显示密钥。
+
+```powershell
+if (-not $env:EXA_API_KEY) {
+    $env:EXA_API_KEY = [Environment]::GetEnvironmentVariable('EXA_API_KEY', 'User')
+}
+if (-not $env:EXA_API_KEY) {
+    $env:EXA_API_KEY = [Environment]::GetEnvironmentVariable('EXA_API_KEY', 'Machine')
+}
+```
+
+使用本机 SearXNG 作为备用时，在 `.env` 中填写端点。只有备用服务需要 Bearer 认证时才填写 `COURSE_SEARCH_API_KEY`。修改配置后重启工作台。
 
 ```dotenv
 COURSE_SEARCH_URL=http://127.0.0.1:8888/search
 COURSE_SEARCH_API_KEY=
 ```
 
-先检查 `/search` 返回的 JSON 中是否有非空 `results`，再跑真实检索用例，确认重启后可读取原结果，并检查会话间的读权限。这项用例可以独立于 HKGAI 运行。 [SearXNG 搜索 API](https://docs.searxng.org/dev/search_api.html) · [项目检索测试](../tests/test_live_search.py)
+先跑真实检索用例，确认已设置 Exa Key 时返回 `provider=exa`、重启后可读取原结果，并检查会话间的读权限。也可独立检查备用 `/search` 是否返回非空 `results`。 [SearXNG 搜索 API](https://docs.searxng.org/dev/search_api.html) · [项目检索测试](../tests/test_live_search.py)
 
 ```powershell
 curl.exe --noproxy '*' --fail --get `

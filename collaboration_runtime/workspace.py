@@ -108,7 +108,7 @@ TOOLS = {
     "list_artifacts": (ToolArgs, "List artifact versions you are authorized to read."),
     "read_artifact": (ReadArtifactArgs, "Read an authorized UTF-8 version and get its read-only mount path. "
                       "Use max_chars and start_char for an excerpt."),
-    "search_web": (SearchArgs, "Search the host-configured retrieval source and record URLs and excerpts."),
+    "search_web": (SearchArgs, "Search the web and save URLs and excerpts. Check the provider and any fallback reason."),
     "get_search_result": (SearchResultArgs, "Retrieve a search record made by this execution session."),
     "read_source": (SourceArgs, "Record evidence from a search result by result_id (1-based) or exact URL. "
                     "Optional max_chars limits the returned excerpt; the full captured text is still recorded."),
@@ -148,15 +148,23 @@ class WorkspaceService:
                 session_id TEXT NOT NULL,
                 scope_id TEXT,
                 query TEXT NOT NULL,
-                results TEXT NOT NULL
+                results TEXT NOT NULL,
+                upstream_status TEXT NOT NULL DEFAULT 'ok',
+                provider TEXT,
+                fallback_reason TEXT
             );
             CREATE TABLE IF NOT EXISTS workspace_sources (
                 source_id TEXT PRIMARY KEY, team_id TEXT NOT NULL, session_id TEXT NOT NULL,
                 scope_id TEXT, data TEXT NOT NULL
             );
         """)
-        if 'upstream_status' not in {row['name'] for row in self.db.execute('PRAGMA table_info(workspace_searches)')}:
+        columns = {row['name'] for row in self.db.execute('PRAGMA table_info(workspace_searches)')}
+        if 'upstream_status' not in columns:
             self.db.execute("ALTER TABLE workspace_searches ADD COLUMN upstream_status TEXT NOT NULL DEFAULT 'ok'")
+        if 'provider' not in columns:
+            self.db.execute("ALTER TABLE workspace_searches ADD COLUMN provider TEXT")
+        if 'fallback_reason' not in columns:
+            self.db.execute("ALTER TABLE workspace_searches ADD COLUMN fallback_reason TEXT")
 
     def _member_actor(self, session_id: str) -> Actor | None:
         member = self.teams.session(session_id)
@@ -385,26 +393,32 @@ class WorkspaceService:
 
     async def _search(self, actor: Actor, query: str, limit: int):
         if self.search is None:
-            raise SearchError("Search is not configured on the host")
+            raise SearchError("Search is not configured on the host. Set EXA_API_KEY or COURSE_SEARCH_URL and restart the host.")
         results = await self.search.search(query, limit)
         self.actor(actor.session_id)
         search_id = uuid4().hex
+        upstream_status = "degraded" if getattr(results, "degraded", False) else "ok"
+        provider = getattr(results, "provider", None)
+        fallback_reason = getattr(results, "fallback_reason", None)
         with self.db:
             self.db.execute(
-                "INSERT INTO workspace_searches (search_id, team_id, session_id, scope_id, query, results, upstream_status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (search_id, actor.team_id, actor.session_id, actor.scope_id, query, json.dumps(results, ensure_ascii=False),
-                 'degraded' if getattr(results, 'degraded', False) else 'ok'),
+                """INSERT INTO workspace_searches
+                   (search_id, team_id, session_id, scope_id, query, results, upstream_status, provider, fallback_reason)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (search_id, actor.team_id, actor.session_id, actor.scope_id, query,
+                 json.dumps(results, ensure_ascii=False), upstream_status, provider, fallback_reason),
             )
         return {"search_id": search_id, "query": query, "results": [{**item, "result_id": i} for i, item in enumerate(results, 1)],
-                "upstream_status": "degraded" if getattr(results, "degraded", False) else "ok"}
+                "upstream_status": upstream_status, "provider": provider, "fallback_reason": fallback_reason}
 
     def _search_record(self, actor: Actor, search_id: str):
         row = self.db.execute(
-            """SELECT query, results, upstream_status FROM workspace_searches
+            """SELECT query, results, upstream_status, provider, fallback_reason FROM workspace_searches
                WHERE search_id = ? AND team_id = ? AND session_id = ? AND scope_id IS ?""",
             (search_id, actor.team_id, actor.session_id, actor.scope_id),
         ).fetchone()
         if row is None:
             raise WorkspaceNotFound("Search record not found")
         return {"search_id": search_id, "query": row["query"], "results": [{**item, "result_id": i} for i, item in enumerate(json.loads(row["results"]), 1)],
-                "upstream_status": row["upstream_status"]}
+                "upstream_status": row["upstream_status"], "provider": row["provider"],
+                "fallback_reason": row["fallback_reason"]}

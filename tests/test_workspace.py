@@ -113,6 +113,7 @@ def test_workspace_acl_assistant_versions_and_search(tmp_path):
         found = await call(qa, 'search_web', query='topic', limit=1)
         assert found['ok'] and len(requests) == 1
         record = found['result']
+        assert record['provider'] == 'searxng' and record['fallback_reason'] is None
         assert record['results'][0] == {'title': 'Example source', 'url': 'https://example.org/article',
                                         'snippet': 'Example excerpt', 'engine': 'fixture', 'result_id': 1}
         reloaded = WorkspaceService(db, teams, sandbox, tmp_path / 'artifacts', search)
