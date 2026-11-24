@@ -257,7 +257,14 @@ class Runtime:
             "SELECT id AS turn_id, role, status, reply, error FROM turns WHERE role = ? AND id = ?",
             (role, turn_id),
         ).fetchone()
-        return dict(row) if row else None
+        if row is None:
+            return None
+        result = dict(row)
+        budget = self.db.execute("SELECT payload FROM events WHERE turn_id=? AND type='model.step_limit' ORDER BY seq DESC LIMIT 1",
+                                 (turn_id,)).fetchone()
+        if budget:
+            result["budget"] = json.loads(budget["payload"])
+        return result
 
     def list_turns(self, role):
         return [dict(row) for row in self.db.execute("""
@@ -453,8 +460,27 @@ class Runtime:
                         return
             with self.db:
                 if self.journal.current(turn.id, turn.generation):
-                    self._event(turn.id, "model.step_limit", generation=turn.generation, step=step)
-                    self._write_finish(turn.id, "failed", error="Turn exceeded its model step limit")
+                    # Only an active formal delivery may spend the single automatic extension.
+                    payload = json.loads(current[0]["content"]) if scheduled else {}
+                    purpose = payload.get("delivery", {}).get("purpose", "")
+                    critical = (purpose.startswith(("task.", "delegation.", "clarification.")) or
+                                payload.get("message", {}).get("kind") == "assignment")
+                    unresolved = self.db.execute("SELECT 1 FROM execution_receipts WHERE turn_id=? AND state='started'",
+                                                 (turn.id,)).fetchone()
+                    auto = bool(scheduled and not fork_message_id and critical and goal_id and not extra_steps
+                                and not unresolved and phase == "model" and self.collaboration.goal_lifecycle.scope_is_open(goal_id))
+                    if unresolved:
+                        self._write_finish(turn.id, "needs_reconciliation", error="Prior tool outcome needs verification")
+                        return
+                    if auto:
+                        self._event(turn.id, "model.retry_requested", extra_steps=self.max_steps, source="automatic")
+                    automatic = self.db.execute("""SELECT count(*) FROM events WHERE turn_id=? AND type='model.retry_requested'
+                                                AND json_extract(payload,'$.source')='automatic'""", (turn.id,)).fetchone()[0]
+                    self._event(turn.id, "model.step_limit", generation=turn.generation, step=step, goal_id=goal_id,
+                                task_id=payload.get("task", {}).get("id"), proposal_id=payload.get("proposal", {}).get("id"),
+                                purpose=purpose, automatic_extensions=automatic,
+                                granted_steps=self.max_steps + extra_steps + (self.max_steps if auto else 0))
+                    self._write_finish(turn.id, "recoverable" if auto else "failed", error="Turn exceeded its model step limit")
         except StaleTurn:
             return
         except UnknownToolOutcome as exc:
