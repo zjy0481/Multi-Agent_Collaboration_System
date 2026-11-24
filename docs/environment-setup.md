@@ -73,7 +73,9 @@ Remove-Item Env:RUN_DOCKER_TESTS
 
 检索由工作台宿主发起。宿主从进程环境读取 `EXA_API_KEY`，优先直连 Exa。若 Exa 超时、请求失败或未返回可用链接，并且配置了 `COURSE_SEARCH_URL`，则同一次工具调用回退到 SearXNG。只配置 SearXNG 时会直接使用它。备用容器可通过 `host.docker.internal:7897` 访问宿主代理。成员的执行容器使用 `--network none`。 [Exa Search API](https://exa.ai/docs/reference/search) · [Docker Desktop 网络说明](https://docs.docker.com/desktop/features/networking/networking-how-tos/) · [沙箱实现](../collaboration_runtime/sandbox.py)
 
-`search_web` 和 `get_search_result` 返回实际提供者 `provider`、上游状态 `upstream_status` 和可能的回退原因 `fallback_reason`。回退或备用引擎部分不可用时，状态记为 `degraded`。`read_source` 可用结果编号或精确 URL 读取当前会话搜索记录中的公网 HTTPS 链接，支持 HTML 和纯文本。宿主最多跟随五次重定向，每跳重新校验并固定公网地址。证据保存原始 URL、最终 URL、跳转链、获取时间及内容哈希，可用 `get_source` 取回。
+`search_web` 和 `get_search_result` 返回实际提供者 `provider`、上游状态 `upstream_status` 和可能的回退原因 `fallback_reason`。回退或备用引擎部分不可用时，状态记为 `degraded`。`read_source` 可用结果编号或精确 URL 读取当前会话搜索记录中的公网 HTTPS 链接。宿主最多跟随五次重定向，每跳重新校验并固定公网地址。证据保存原始 URL、最终 URL、跳转链、获取时间及原始内容哈希，可用 `get_source` 取回。
+
+原文读取支持 HTML、纯文本和带文本层的 PDF。PDF 由宿主虚拟环境中随 `requirements.txt` 安装的 pypdf 提取，下载限 5 MB、提取限 5 秒和前 20 页，返回文本最多保留 40,000 字符。扫描件或加密 PDF 会返回提取错误。若来源站拒绝访问，工具保留站点 HTTP 状态并提示选择其他公开原文。 [pypdf 文本提取说明](https://pypdf.readthedocs.io/en/stable/user/extract-text.html)
 
 ### 验证 SearXNG 使用的 Windows 代理
 
@@ -211,6 +213,8 @@ Remove-Item Env:RUN_LIVE_COURSE_SEARCH_TESTS
 课程模型返回 HTTP 402 时，当前进程暂停领取新的模型待办。已领取的可恢复工作保留原回合和工具回执。操作者可通过本地 OpenAPI 页面查看 `GET /v1/model/status`。处理余额或配额后，使用操作者凭据调用 `POST /v1/model/resume`，调度器继续领取队列中的工作。该接口解除本地暂停，后续真实模型请求负责验证端点是否恢复。目标截止时间继续按原设置计算。重启服务会重新检查端点，待办和检查点仍保存在 SQLite。 [本地 API](http://127.0.0.1:8000/docs)
 
 模型工具可按需查询 `list_delegation` 的 `compact` 视图。搜索结果的 `result_id` 可用于读取本次搜索命中的原文，也可沿用精确 URL。文本读取工具支持用 `start_char` 和 `max_chars` 指定片段。排查沙箱延迟时，可在 `run_command` 中启用 `measure_timings`，回执会报告总用时和 Docker CLI 进程用时。
+
+一次模型决策最多可发出 8 个工具调用。超出的批次整体丢弃并占用一个普通回合步骤，运行时在剩余预算内给模型一次缩小批次的机会。沙箱默认镜像中的 Python 可用 `urllib.request` 测试容器内运行的本地服务。公网检索使用 `search_web` 和 `read_source`。
 
 ## 已知问题与验收状态
 
