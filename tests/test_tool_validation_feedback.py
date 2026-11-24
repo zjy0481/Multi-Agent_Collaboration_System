@@ -2,6 +2,7 @@ import json
 from types import SimpleNamespace
 
 from collaboration_runtime.delegation_tools import DelegationTools
+from collaboration_runtime.teams import TeamNotFound
 
 
 class Auth:
@@ -45,3 +46,23 @@ def test_compact_inference_preserves_legacy_and_explicit_modes():
     assert tool.execute("session", "list_delegation", '{"compact": false}')['result'] == {"legacy": True, "active_goals": []}
     assert tool.execute("session", "list_delegation", '{"compact": false, "limit": 50}')['status'] == 422
     assert tool.execute("session", "list_delegation", '{"compact": false, "goal_id": null}')['status'] == 422
+
+
+def test_get_task_not_found_has_uniform_recovery_guidance():
+    class MissingTaskService(Service):
+        def get_task(self, team_id, actor, task_id, revision):
+            raise TeamNotFound("Task not found")
+
+    tool = DelegationTools(MissingTaskService(), Auth(), None)
+    results = [tool.execute("session", "get_task", json.dumps(args)) for args in (
+        {"task_id": "missing"}, {"task_id": "inaccessible"},
+        {"task_id": "visible", "revision": 999},
+    )]
+    assert all(result == results[0] for result in results)
+    assert results[0]["status"] == 404
+    assert "list_delegation" in results[0]["next_action"]
+    assert "Lead" in results[0]["next_action"] and "Repeating" in results[0]["next_action"]
+    conflict = tool.execute("session", "list_delegation", '{"compact": false, "limit": 3}')
+    assert conflict["status"] == 422 and "compact=true or omit compact" in conflict["error"]
+    schema = next(item["function"] for item in tool.tools_for("session") if item["function"]["name"] == "list_delegation")
+    assert "omit compact" in schema["parameters"]["properties"]["compact"]["description"]

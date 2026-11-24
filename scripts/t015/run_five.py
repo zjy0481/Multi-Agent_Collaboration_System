@@ -29,6 +29,7 @@ from collaboration_runtime.sandbox import DockerSandbox
 from collaboration_runtime.search import SearchClient
 from handoff import prepare_software_state
 from recovery import retry_key
+from software_handoff import audit_t1_handoff, audit_t2_handoff
 
 
 SCENARIOS = {"software": "scenario_1*", "newsroom": "scenario_2*", "fund": "scenario_3*"}
@@ -98,7 +99,9 @@ class Scenario:
         self.sample = next((ROOT / "test samples").glob(SCENARIOS[name]))
         self.state = directory / "state"
         self.fixture = None
-        if name == "software":
+        self.fresh_software = args.fresh_software and name == "software"
+        self.t1_handoff = None
+        if name == "software" and not self.fresh_software:
             self.fixture = prepare_software_state(args.software_baseline, self.state, directory / "fixture")
         else:
             self.state.mkdir(parents=True, exist_ok=False)
@@ -200,7 +203,8 @@ class Scenario:
     def phase(self, client, number):
         filename = "02_task_1.md" if number == 1 else "03_task_2.md"
         text = prompt_text(self.sample / filename)
-        observed_failures = {turn["id"] for turn in client.portal.call(self.collect_status)["turns"]
+        before = client.portal.call(self.collect_status)
+        observed_failures = {turn["id"] for turn in before["turns"]
                              if turn["status"] in {"failed", "needs_reconciliation"}}
         observed_failures_at_start = observed_failures.copy()
         required_inputs = []
@@ -210,7 +214,48 @@ class Scenario:
                                for member in self.team['members'] if member['role_id'] in {'dev', 'qa'}]
             if len(required_inputs) != 2:
                 raise RuntimeError('Software dev and qa members are required for the handoff')
-        sent = self.send(client, text, kind="assignment", **({'required_inputs': required_inputs} if required_inputs else {}))
+        if self.fresh_software and number == 2 and self.t1_handoff:
+            versions = [self.t1_handoff.get('app_version_id'), self.t1_handoff.get('database_version_id')]
+            if all(versions):
+                required_inputs = [{'owner_id': member['member_id'], 'version_ids': versions}
+                                   for member in self.team['members'] if member['role_id'] in {'dev', 'qa'}]
+                if len(required_inputs) != 2:
+                    raise RuntimeError('Software dev and qa members are required for the handoff')
+        extra = {'required_inputs': required_inputs} if required_inputs else {}
+        if self.fresh_software:
+            minutes = [round(self.stage_seconds * f / 60, 2) for f in (.15, .4, .6, .8, 1)]
+            guidance = (f"Time budget: {self.stage_seconds} seconds. Minute {minutes[0]}: register development; "
+                        f"{minutes[1]}: publish a runnable candidate with launch instructions and a smoke result; "
+                        f"{minutes[2]}: first review; {minutes[3]}: any rework; {minutes[4]}: close if accepted. "
+                        "Developer builds; QA prepares checks and reviews the shared version; Release prepares "
+                        "instructions. Publish and submit the first checkable outcome before optional refinements. ")
+            if number == 1:
+                guidance += (
+                    "Publish the runnable candidate as t1-app.zip for Lead, Developer, QA and Release. "
+                    "Use a persistent workspace SQLite database from the first demonstration. Make several real calls "
+                    "to the running app, including a successful reservation and cancellation. Before final review "
+                    "use sqlite3.Connection.backup and publish t1-bookings.sqlite3 and t1-data-provenance.json. "
+                    "Print T015_SNAPSHOT_SHA256=<snapshot hash> in the successful backup command. The provenance "
+                    "JSON includes app_version_id, app_sha256, database_sha256, relative source_database_path, "
+                    "backup_method (sqlite3.Connection.backup), operations (method and HTTP status), and schema "
+                    "(table, room, date, start, end, status, active_values, cancelled_values). Include approved app "
+                    "and snapshot versions in the final evidence."
+                )
+            else:
+                handoff = self.t1_handoff or {}
+                guidance += (
+                    f"T1 application: {handoff.get('app_version_id') or 'unavailable'}. "
+                    f"T1 booking snapshot: {handoff.get('database_version_id') or 'unavailable'}. "
+                    f"T1 formal handoff evidence ready: {bool(handoff.get('strict_ready'))}. "
+                    "Use any available fixed versions read-only and report what is missing or unapproved. "
+                    "Extend that build and validate the actual dashboard against the same snapshot. "
+                    "Publish t2-dashboard-check.json with database_version_id, range_start, range_end and "
+                    "observed metrics: total_count, total_minutes, cancelled_count, rooms (count, minutes, "
+                    "cancelled_count), busiest_dates and busiest_periods. Count valid active bookings in usage "
+                    "and cancellations separately. Use inclusive YYYY-MM-DD dates and HH:MM hours with ties."
+                )
+            extra['assignment_guidance'] = guidance
+        sent = self.send(client, text, kind="assignment", **extra)
         source = sent["message_id"]
         self.assignment_ids.append(source)
         self.log("assignment", phase=number, message_id=source,
@@ -237,10 +282,19 @@ class Scenario:
         resume_counts = {}
         reminders = 0
         outcome = None
+        milestone_fractions = iter((.15, .4, .6, .8, 1.0)) if self.fresh_software else iter(())
+        next_milestone = next(milestone_fractions, None)
         delivery_seconds = None
         while True:
             status = client.portal.call(self.collect_status, source)
             current_time = time.monotonic()
+            while next_milestone is not None and current_time - began >= self.stage_seconds * next_milestone:
+                self.log('milestone', phase=number, fraction=next_milestone,
+                         elapsed=round(current_time-began, 2), assignment_id=source,
+                         goal_id=status['goal']['id'] if status['goal'] else None,
+                         since_assignment={key: value - before['counts'][key]
+                                           for key, value in status['counts'].items()})
+                next_milestone = next(milestone_fractions, None)
             with (self.directory / f'task{number}-active-samples.jsonl').open('a', encoding='utf-8') as samples:
                 samples.write(json.dumps({'elapsed': round(current_time-began, 3), 'active': status['active']})+'\n')
             goal_status = status["goal"]["status"] if status["goal"] else "pending_registration"
@@ -368,6 +422,15 @@ class Scenario:
                         return "provider_paused"
                     if self.phase(client, phase) == "provider_paused":
                         return "provider_paused"
+                    if self.fresh_software:
+                        if phase == 1:
+                            self.t1_handoff = client.portal.call(audit_t1_handoff, self.app, self.team, self.assignment_ids[-1])
+                            write_json(self.directory / 't1-handoff-audit.json', self.t1_handoff)
+                            self.log('handoff_audit', phase=1, assignment_id=self.assignment_ids[-1], **self.t1_handoff)
+                        else:
+                            audit = client.portal.call(audit_t2_handoff, self.app, self.team, self.assignment_ids[-1], self.t1_handoff)
+                            write_json(self.directory / 't2-handoff-audit.json', audit)
+                            self.log('handoff_audit', phase=2, assignment_id=self.assignment_ids[-1], audit=audit)
             finally:
                 self.dump(client, "final")
         return "finished"
@@ -378,12 +441,19 @@ def main():
     parser.set_defaults(scenarios=list(SCENARIOS))
     parser.add_argument("--run", required=True)
     parser.add_argument("--stage-seconds", type=int, default=1200)
-    parser.add_argument("--grace-seconds", type=int, default=75)
+    parser.add_argument("--grace-seconds", type=int, help="Optional extension after the stage deadline")
     parser.add_argument("--idle-seconds", type=float, default=45)
     parser.add_argument("--jobs", type=int, default=1)
-    parser.add_argument('--software-baseline', type=Path,
-                        required=True, help='Original completed software T1 scenario directory')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--software-baseline', type=Path, help='Original completed software T1 scenario directory')
+    group.add_argument('--fresh-software', action='store_true', help='Run only software T1 and T2 in one fresh team')
     args = parser.parse_args()
+    if args.grace_seconds is None:
+        args.grace_seconds = 0 if args.fresh_software else 75
+    if args.fresh_software:
+        args.scenarios = ["software"]
+        if args.jobs != 1:
+            parser.error("--fresh-software requires --jobs 1")
     if re.fullmatch(r"[a-zA-Z0-9_-]+", args.run) is None:
         raise ValueError("Invalid run directory name")
     os.environ.pop("COLLABORATION_GIT_TARGETS_DIR", None)
@@ -402,14 +472,14 @@ def main():
     model_logger.setLevel(logging.INFO)
     model_logger.addHandler(diagnostic)
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
-    for script in ('run_five.py', 'recovery.py', 'handoff.py', 'create_fixture.py'):
+    for script in ('run_five.py', 'recovery.py', 'handoff.py', 'create_fixture.py', 'software_handoff.py'):
         shutil.copyfile(Path(__file__).with_name(script), parent / script)
     runtime_sources = {str(path.relative_to(ROOT)).replace(os.sep, "/"): hashlib.sha256(path.read_bytes()).hexdigest()
                        for path in sorted((ROOT / "collaboration_runtime").rglob("*.py"))}
     write_json(parent / "run.json", {"revision": revision, "scenarios": args.scenarios, "started_at": now(),
                                      "stage_seconds": args.stage_seconds, "grace_seconds": args.grace_seconds,
                                      "idle_seconds": args.idle_seconds,
-                                     "jobs": args.jobs, "runtime_source_sha256": runtime_sources})
+                                     "jobs": args.jobs, "fresh_software": args.fresh_software, "runtime_source_sha256": runtime_sources})
 
     def run_scenario(scenario):
         try:

@@ -44,7 +44,7 @@ class ReviewResultTool(ReviewResultInput):
 
 
 class ListDelegationTool(Command):
-    compact: bool = False
+    compact: bool = Field(default=False, description="For goal_id or limit, set compact=true or omit compact to infer compact output.")
     goal_id: ObjectId | None = None
     limit: Annotated[int, Field(ge=1, le=100)] = 50
 
@@ -61,7 +61,7 @@ TOOLS = {
     "get_task": (ReadTaskTool, "Read a task and its current or specified revision."),
     "submit_result": (SubmitResultTool, "As the current task owner, submit exact published version IDs and evidence for the expected revision."),
     "review_result": (ReviewResultTool, "As the designated reviewer, decide an exact pending submission. Provide evidence per 1-based acceptance criterion; a return needs expectations and recheck items."),
-    "list_delegation": (ListDelegationTool, "List visible goals, proposals and tasks. When compact is omitted, goal_id or limit selects compact output."),
+    "list_delegation": (ListDelegationTool, "List visible goals, proposals and tasks. For goal_id or limit, set compact=true or omit compact to infer compact output; compact=false cannot be combined with filters."),
 }
 
 COMMAND_TYPES = {
@@ -123,7 +123,7 @@ class DelegationTools:
                     result = self.service.compact_snapshot(actor.team_id, actor, goal_id=args.goal_id, limit=args.limit)
                 else:
                     if filters_supplied:
-                        raise CollaborationInvalid("goal_id and limit require compact mode")
+                        raise CollaborationInvalid("goal_id and limit require compact mode; set compact=true or omit compact to infer compact output")
                     result = self.service.snapshot(actor.team_id, actor)
                     result["active_goals"] = self.service.active_goals(actor.team_id, actor)
             elif name == "create_proposal":
@@ -153,6 +153,9 @@ class DelegationTools:
             else:
                 status = 404
             result = {"ok": False, "error": str(exc), "status": status}
+            if name == "get_task" and isinstance(exc, TeamNotFound):
+                result["next_action"] = ("Use list_delegation to find visible tasks, or ask the Lead for an authorized output handoff. "
+                                         "Repeating the same input will not help.")
             if hasattr(exc, "details"):
                 result["details"] = exc.details
             return result

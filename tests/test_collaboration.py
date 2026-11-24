@@ -296,3 +296,45 @@ def test_formal_model_tools_use_the_execution_identity(tmp_path):
                 "request_id": "invalid-model", "text": "Invalid", **extra,
             })
             assert denied["status"] == 422
+
+
+def test_operator_assignment_guidance_persists_and_is_delivery_scoped(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens = setup_team(client)
+        token = tokens[lead['member_id']]
+        payload = {'request_id': 'guided', 'text': 'Official assignment unchanged', 'kind': 'assignment',
+                   'assignment_guidance': 'Use the provided workspace.'}
+        first = send(client, base, OPERATOR, **payload)
+        assert send(client, base, OPERATOR, **payload) == first
+        assert client.post(f'{base}/messages', headers=auth(OPERATOR), json={
+            **payload, 'assignment_guidance': 'Different guidance'}).status_code == 409
+        assert client.post(f'{base}/messages', headers=auth(OPERATOR), json={
+            **payload, 'request_id': 'bad-kind', 'kind': 'chat'}).status_code == 403
+        assert client.post(f'{base}/messages', headers=auth(token), json={
+            **payload, 'request_id': 'bad-member'}).status_code == 403
+        assert client.post(f'{base}/messages', headers=auth(OPERATOR), json={
+            **payload, 'request_id': 'too-long', 'assignment_guidance': 'x' * 4001}).status_code == 422
+        message = client.get(f"{base}/messages/{first['message_id']}", headers=auth(token)).json()
+        assert message['text'] == payload['text'] and 'assignment_guidance' not in message
+        delivery = next(d for d in client.get(f'{base}/deliveries', headers=auth(token)).json()
+                        if d['message_id'] == first['message_id'])
+        def execution():
+            actor = client.app.state.auth.member(lead['session_id'])
+            return client.app.state.collaboration.execution_input(dict(delivery), actor)
+        actual = client.portal.call(execution)
+        assert actual['assignment_guidance'] == payload['assignment_guidance']
+        assert actual['message']['text'] == payload['text']
+        forged = {**delivery, 'event_id': delivery['event_id'] + 99999}
+        def forged_execution():
+            actor = client.app.state.auth.member(lead['session_id'])
+            return client.app.state.collaboration.execution_input(forged, actor)
+        assert 'assignment_guidance' not in client.portal.call(forged_execution)
+        old = {'request_id': 'old', 'text': 'Old assignment', 'kind': 'assignment'}
+        old_receipt = send(client, base, OPERATOR, **old)
+    with TestClient(app(tmp_path)) as client:
+        assert send(client, base, OPERATOR, **payload) == first
+        assert send(client, base, OPERATOR, **old) == old_receipt
+        def restored_execution():
+            actor = client.app.state.auth.member(lead['session_id'])
+            return client.app.state.collaboration.execution_input(dict(delivery), actor)
+        assert client.portal.call(restored_execution)['assignment_guidance'] == payload['assignment_guidance']
