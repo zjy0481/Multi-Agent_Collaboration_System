@@ -14,7 +14,7 @@ from .artifacts import ArtifactError, ArtifactNotFound, ArtifactStore
 from .sandbox import SandboxError
 from .validation_feedback import validation_feedback
 from .search import SearchError
-from .source_fetch import fetch_public_source
+from .source_fetch import SourceHTTPError, fetch_public_source
 
 
 class WorkspaceNotFound(Exception):
@@ -111,7 +111,8 @@ TOOLS = {
     "search_web": (SearchArgs, "Search the web and save URLs and excerpts. Check the provider and any fallback reason."),
     "get_search_result": (SearchResultArgs, "Retrieve a search record made by this execution session."),
     "read_source": (SourceArgs, "Record evidence from a search result by result_id (1-based) or exact URL. "
-                    "Optional max_chars limits the returned excerpt; the full captured text is still recorded."),
+                    "Supports accessible HTML, text and text-based PDFs. If a site rejects access, use a different "
+                    "public result. Search excerpts are leads. max_chars limits the returned excerpt."),
     "get_source": (SourceRecordArgs, "Retrieve recorded source text and provenance. Use max_chars and start_char for an excerpt."),
 }
 
@@ -322,6 +323,14 @@ class WorkspaceService:
                     "If you are an assistant, ask your parent to hand the version off to you."
                 )}
             return {"ok": False, "error": str(exc)}
+        except SourceHTTPError as exc:
+            result = {"ok": False, "error": str(exc), "status": exc.status_code}
+            if exc.status_code in {202, 401, 403, 404, 406, 410}:
+                result["next_action"] = (
+                    "Try a different accessible public source with read_source. Use a search excerpt as a lead "
+                    "and mark any claim you cannot verify."
+                )
+            return result
         except (WorkspaceNotFound, ArtifactError, SearchError, SandboxError) as exc:
             return {"ok": False, "error": str(exc)}
 
