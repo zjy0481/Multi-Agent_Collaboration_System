@@ -40,9 +40,9 @@ from .goal_lifecycle import (
     TerminalInput,
 )
 from .local_auth import LocalAuth, Principal, SESSION_COOKIE, operator_credential
-from .model import ChatCompletionsModel, ModelPaused, load_model
+from .model import ChatCompletionsModel, ModelPaused, load_model, read_llm_config
 from .roles import ROLE_ID_PATTERN, RoleDefinition, RoleFileError
-from .runtime import ROLES, Runtime, TurnConflict
+from .runtime import DEFAULT_MAX_STEPS, ROLES, Runtime, TurnConflict
 from .sandbox import DockerSandbox
 from .scheduler import DeliveryScheduler
 from .search import SearchClient
@@ -155,7 +155,14 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @asynccontextmanager
     async def lifespan(app):
         state = Path(state_dir or os.environ.get("COLLABORATION_STATE_DIR", ".tmp/runtime"))
-        selected_model = model if model is not None else load_model()
+        config = read_llm_config()
+        runtime_config = config.get("runtime", {})
+        if not isinstance(runtime_config, dict) or runtime_config.keys() - {"max_steps"}:
+            raise ValueError("llm.toml [runtime] supports only max_steps")
+        max_steps = runtime_config.get("max_steps", DEFAULT_MAX_STEPS)
+        if type(max_steps) is not int or max_steps < 1:
+            raise ValueError("llm.toml runtime.max_steps must be a positive integer")
+        selected_model = model if model is not None else load_model(config=config)
         runtime = None
         teams = None
         selected_search = None
@@ -166,7 +173,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             selected_sandbox = sandbox if sandbox is not None else DockerSandbox(
                 state / "sandbox", image=os.environ.get("COLLABORATION_SANDBOX_IMAGE", "collaboration-sandbox:local")
             )
-            runtime = Runtime(selected_model, selected_sandbox, state / "runtime.sqlite3")
+            runtime = Runtime(selected_model, selected_sandbox, state / "runtime.sqlite3", max_steps=max_steps)
             teams = TeamService(runtime.db, selected_model, selected_sandbox, bootstrap)
             actual_operator_token = operator_token if operator_token is not None else operator_credential(state)
             if (configured_host_token is not None

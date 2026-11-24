@@ -35,6 +35,15 @@ if (-not (Test-Path -LiteralPath '.env')) {
 - DeepSeek 模型请求显式关闭思考模式，以兼容含已有工具调用的会话历史。运行记录区分 `course`、`deepseek` 和 `opencode`；`COLLABORATION_MODEL_MODE=course` 是兼容旧配置的联网模式，会读取 `llm.toml`，设为 `mock` 则始终离线。缺少所选 Key 时启动报错，不会换用其他供应商。
 - 切换后，新供应商可能收到既有会话历史。建议先结束进行中的回合；若不希望转发旧会话，可用新的 `COLLABORATION_STATE_DIR` 启动。课程 HKGAI 专项测试仍需选择 `hkgai`。
 
+### 配置回合步数上限
+
+在 `llm.toml` 中设置 `[runtime]` 下的 `max_steps`，重启服务后生效。该值须为正整数，省略时默认为 20 步。所有供应商和离线模拟共用此设置。达到上限后，从检查点恢复原回合时，每次可追加同样的步数。
+
+```toml
+[runtime]
+max_steps = 20
+```
+
 ## 启动
 
 ```powershell

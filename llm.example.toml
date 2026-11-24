@@ -5,3 +5,6 @@ model = "deepseek-flash"
 
 [opencode]
 model = "deepseek-v4.1-flash"
+
+[runtime]
+max_steps = 20

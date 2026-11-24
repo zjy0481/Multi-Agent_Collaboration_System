@@ -99,15 +99,19 @@ def _timeout_options(values):
     return {"timeout": timeout}
 
 
-def _provider_config(config_file: Path) -> tuple[str, dict]:
+def read_llm_config(env_file: Path | None = None) -> dict:
+    config_file = (PROJECT_ENV if env_file is None else env_file).with_name("llm.toml")
     try:
-        config = tomllib.loads(config_file.read_text(encoding="utf-8-sig"))
+        return tomllib.loads(config_file.read_text(encoding="utf-8-sig"))
     except FileNotFoundError:
-        return "hkgai", {}
+        return {}
     except (OSError, UnicodeError, tomllib.TOMLDecodeError):
         raise ModelError("Could not read llm.toml as UTF-8 TOML") from None
-    if config.keys() - {"provider", *PROVIDER_SETTINGS}:
-        raise ModelError("llm.toml supports only provider, [deepseek] and [opencode]; put API keys in .env")
+
+
+def _provider_config(config: dict) -> tuple[str, dict]:
+    if config.keys() - {"provider", "runtime", *PROVIDER_SETTINGS}:
+        raise ModelError("llm.toml supports only provider, [deepseek], [opencode] and [runtime]; put API keys in .env")
     provider = config.get("provider", "hkgai")
     if not isinstance(provider, str) or (provider != "hkgai" and provider not in PROVIDER_SETTINGS):
         raise ModelError("llm.toml provider must be hkgai, deepseek or opencode")
@@ -296,7 +300,7 @@ class MockModel:
         pass
 
 
-def load_model(env_file: Path | None = None) -> ChatCompletionsModel | MockModel:
+def load_model(env_file: Path | None = None, *, config: dict | None = None) -> ChatCompletionsModel | MockModel:
     """Read the selected provider and only its credentials; never fall back on errors."""
     env_file = PROJECT_ENV if env_file is None else env_file
     values = _env_values(env_file)
@@ -306,7 +310,7 @@ def load_model(env_file: Path | None = None) -> ChatCompletionsModel | MockModel
         return MockModel()
     if mode != "course":
         raise ModelError("COLLABORATION_MODEL_MODE must be course or mock")
-    provider, models = _provider_config(env_file.with_name("llm.toml"))
+    provider, models = _provider_config(read_llm_config(env_file) if config is None else config)
     timeout = _timeout_options(values)
     if provider == "hkgai":
         return CourseModel(*_required_settings(COURSE_SETTINGS, values), **timeout)

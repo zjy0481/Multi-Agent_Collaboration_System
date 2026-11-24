@@ -17,6 +17,7 @@ from .sandbox import SandboxError
 from .workspace import WorkspaceNotFound
 
 logger = logging.getLogger(__name__)
+DEFAULT_MAX_STEPS = 20
 
 ROLES = {
     "developer": "You are the developer. Implement and test the requested changes. "
@@ -122,7 +123,7 @@ class CloseGoalCall:
 
 
 class Runtime:
-    def __init__(self, model, sandbox, database: Path, max_steps: int = 20):
+    def __init__(self, model, sandbox, database: Path, max_steps: int = DEFAULT_MAX_STEPS):
         self.model = model
         self._model_session_scope = str(Path(database).resolve())
         self.sandbox = sandbox

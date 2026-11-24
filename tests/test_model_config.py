@@ -130,8 +130,10 @@ def test_provider_config_routes_the_runtime_tool_loop(tmp_path, monkeypatch, pro
     env_file = tmp_path / ".env"
     env_file.write_text(f"COLLABORATION_MODEL_MODE=course\nCOURSE_API_KEY=course-secret\n{key_name}=provider-key\n",
                         encoding="utf-8")
-    (tmp_path / "llm.toml").write_text(f'provider = "{provider}"\n[{provider}]\nmodel = "{model_id}"\n',
-                                      encoding="utf-8-sig")
+    (tmp_path / "llm.toml").write_text(
+        f'provider = "{provider}"\n[{provider}]\nmodel = "{model_id}"\n[runtime]\nmax_steps = 7\n',
+        encoding="utf-8-sig",
+    )
     monkeypatch.setattr("collaboration_runtime.model.PROJECT_ENV", env_file)
     monkeypatch.setattr("collaboration_runtime.search.PROJECT_ENV", env_file)
     monkeypatch.setenv("COURSE_SEARCH_URL", "")
@@ -170,6 +172,7 @@ def test_provider_config_routes_the_runtime_tool_loop(tmp_path, monkeypatch, pro
         transport=httpx.MockTransport(respond), **kwargs))
     app = create_app(sandbox=Sandbox(), state_dir=tmp_path / "state", operator_token="test-operator-token")
     with TestClient(app, headers={"Authorization": "Bearer test-operator-token"}) as client:
+        assert app.state.runtime.max_steps == 7
         for role in ("developer", "tester"):
             started = client.post(f"/v1/sessions/{role}/turns", json={"text": "Try the model"})
             assert started.status_code == 202
@@ -234,6 +237,32 @@ def test_explicit_mock_mode_does_not_require_selected_provider_key(tmp_path):
     env_file.write_text("COLLABORATION_MODEL_MODE=mock\n", encoding="utf-8")
     (tmp_path / "llm.toml").write_text('provider = "opencode"\n', encoding="utf-8")
     assert load_model(env_file).identity["mode"] == "mock"
+
+
+@pytest.mark.parametrize(("config", "expected"), [
+    (None, 20),
+    ('provider = "opencode"\n', 20),
+    ('[runtime]\nmax_steps = 5\n', 5),
+])
+def test_mock_runtime_step_limit_from_config(tmp_path, monkeypatch, config, expected):
+    monkeypatch.setenv("COLLABORATION_MODEL_MODE", "mock")
+    monkeypatch.setattr("collaboration_runtime.model.PROJECT_ENV", tmp_path / ".env")
+    if config is not None:
+        (tmp_path / "llm.toml").write_text(config, encoding="utf-8")
+    app = create_app(sandbox=object(), search=object(), state_dir=tmp_path / "state",
+                     operator_token="test-operator-token", schedule=False)
+    with TestClient(app):
+        assert app.state.runtime.max_steps == expected
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "2.5", '"20"', "true"])
+def test_invalid_runtime_step_limit_rejects_startup(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("COLLABORATION_MODEL_MODE", "mock")
+    monkeypatch.setattr("collaboration_runtime.model.PROJECT_ENV", tmp_path / ".env")
+    (tmp_path / "llm.toml").write_text(f"[runtime]\nmax_steps = {value}\n", encoding="utf-8")
+    app = create_app(state_dir=tmp_path / "state")
+    with pytest.raises(ValueError, match=r"runtime\.max_steps must be a positive integer"), TestClient(app):
+        pytest.fail("The service started with an invalid step limit")
 
 
 def test_course_timeout_from_environment_and_validation(tmp_path, monkeypatch):
