@@ -35,13 +35,20 @@ class RequiredInput(Command):
     version_ids: Annotated[list[ObjectId], Field(min_length=1, max_length=100)]
 
 
-class MessageInput(Command):
+class MessageFields(Command):
     request_id: RequestId
     text: Text
     recipient_id: ObjectId | None = None
     mentions: list[ObjectId] = Field(default_factory=list, max_length=100)
     reply_to: ObjectId | None = None
     goal_id: ObjectId | None = None
+
+
+class MemberMessageInput(MessageFields):
+    kind: Literal["chat", "progress"] = "chat"
+
+
+class MessageInput(MessageFields):
     kind: Literal["chat", "progress", "assignment", "supplement"] = "chat"
     required_inputs: Annotated[list[RequiredInput], Field(default_factory=list, max_length=100)]
 
@@ -711,7 +718,7 @@ class CollaborationService:
                         if args.goal_id is not None and args.goal_id != goal_id:
                             raise CollaborationInvalid("The message goal must match the current work")
                         args = args.model_copy(update={"goal_id": goal_id})
-                result = self.send_message(actor.team_id, actor, args)
+                result = self.send_message(actor.team_id, actor, MessageInput(**args.model_dump()))
             elif name == "register_goal":
                 result = self.register_goal(actor.team_id, actor, args)
             elif name == "get_message":
@@ -737,7 +744,7 @@ class CollaborationService:
 TOOLS = {
     "list_participants": (Command, "List the participant IDs and names in your team."),
     "get_message": (ReadMessageInput, "Read a visible message by ID."),
-    "send_message": (MessageInput, "Send a group or bilateral team message. Supply a unique request ID and goal_id for goal-related messages."),
+    "send_message": (MemberMessageInput, "Send a team chat or progress update. Use mentions for a directed group message or recipient_id for a bilateral message."),
     "register_goal": (GoalInput, "As Lead, register the user's original assignment by message ID."),
     "ask_human": (QuestionInput, "Ask the user a blocking question about a message delivered to your session. "
                   "Pass its message ID. This pauses the turn until a quoted reply makes that work ready again."),

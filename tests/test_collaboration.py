@@ -244,6 +244,11 @@ def test_formal_model_tools_use_the_execution_identity(tmp_path):
             if messages[-1]["role"] == "tool":
                 assert messages[-1]["tool_call_id"] == "original-call"
                 return {"role": "assistant", "content": messages[-1]["content"]}
+            schema = next(tool["function"]["parameters"] for tool in tools
+                          if tool["function"]["name"] == "send_message")
+            assert schema["properties"]["kind"]["enum"] == ["chat", "progress"]
+            assert "required_inputs" not in schema["properties"]
+            assert schema["additionalProperties"] is False
             name, arguments = self.action
             assert name in {tool["function"]["name"] for tool in tools}
             return {"role": "assistant", "content": None, "tool_calls": [{
@@ -279,3 +284,15 @@ def test_formal_model_tools_use_the_execution_identity(tmp_path):
         result = run_tool(lead, lead_token, "register_goal", args)
         assert result["ok"] is True
         assert client.post(f"{base}/goals", headers=auth(lead_token), json=args).json() == result["result"]
+
+        for kind in ("chat", "progress"):
+            sent = run_tool(lead, lead_token, "send_message", {
+                "request_id": f"model-{kind}", "text": "Update", "kind": kind,
+                "recipient_id": outsider["member_id"],
+            })
+            assert sent["ok"] is True
+        for extra in ({"kind": "assignment"}, {"kind": "supplement"}, {"required_inputs": []}):
+            denied = run_tool(lead, lead_token, "send_message", {
+                "request_id": "invalid-model", "text": "Invalid", **extra,
+            })
+            assert denied["status"] == 422
