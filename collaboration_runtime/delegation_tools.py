@@ -50,7 +50,7 @@ class ListDelegationTool(Command):
 
 
 TOOLS = {
-    "create_proposal": (CreateProposalInput, "Open an initial negotiation or propose a revision to a task."),
+    "create_proposal": (CreateProposalInput, "Open an initial proposal with scope_id (no task_id or base_revision), or a revision with task_id and base_revision (no scope_id)."),
     "counter_proposal": (ProposalCounterTool, "Offer new terms for the current proposal version. This clears confirmations for the new version."),
     "confirm_proposal": (ProposalVersionTool, "Confirm the exact current proposal version as a required party."),
     "reject_proposal": (ProposalReasonTool, "Reject the current proposal version as a required party."),
