@@ -9,9 +9,11 @@ import sqlite3
 from uuid import uuid4
 
 from .collaboration import CollaborationInvalid
+from .context_window import bounded_messages, size
 from .delegation_tools import TOOLS as DELEGATION_TOOLS
 from .experience import ExperienceTools
 from .journal import ExecutionJournal, GOAL_CONFIRMATION_PHASE
+from .local_auth import OPERATOR_ID
 from .model import ModelError, ModelPaused, ModelUnavailable, complete_model, model_request_context
 from .sandbox import SandboxError
 from .workspace import WorkspaceNotFound
@@ -129,6 +131,7 @@ class Runtime:
         self._model_session_scope = str(Path(database).resolve())
         self.sandbox = sandbox
         self.max_steps = max_steps
+        self.context_chars = 96_000
         self.active: dict[str, ActiveTurn] = {}
         self.closing = False
         self.workspace_tools = None
@@ -281,16 +284,58 @@ class Runtime:
             for row in rows
         ]
 
-    def _history(self, role: str, message_ids: set[str] | None = None) -> list[dict]:
+    def _history(self, role: str, message_ids: set[str] | None = None, *, budget=None):
         rows = self.db.execute("""
             SELECT t.history, d.message_id FROM turns t
             LEFT JOIN scheduled_turns s ON s.turn_id = t.id
             LEFT JOIN message_deliveries d USING (event_id, session_id, purpose)
             WHERE t.role = ? AND t.status IN ('completed', 'waiting_human', 'waiting_approval')
-            ORDER BY t.rowid
+            ORDER BY t.rowid DESC
         """, (role,))
-        return [message for row in rows if message_ids is None or row["message_id"] in message_ids
-                for message in json.loads(row["history"])]
+        turns, used, trimmed = [], 0, False
+        for row in rows:
+            if message_ids is not None and row["message_id"] not in message_ids:
+                continue
+            if budget is not None and used + len(row["history"]) > budget:
+                trimmed = True
+                break
+            used += len(row["history"])
+            turns.append(json.loads(row["history"]))
+        return [message for turn in reversed(turns) for message in turn], trimmed
+
+    def _context_state(self, team_id, role, goal_id, scope):
+        """Rebuild references only through this member's current read permissions."""
+        actor = self.collaboration.auth.member(role)
+        state = {"history_compacted": True, "goal_id": goal_id,
+                 "lookup": "Use list_delegation, get_task and get_goal to retrieve current authorized records."}
+        if actor is None or goal_id is None:
+            return state
+        service = self.collaboration.delegation
+        current = service.compact_snapshot(team_id, actor, goal_id=goal_id, limit=16)
+        tasks = []
+        for row in current["tasks"]:
+            item = dict(row)
+            submission = service.results._latest(row["id"], row["revision"])
+            if submission and service.results._can_read_versions(team_id, actor, submission):
+                item["submission_id"] = submission["id"]
+                if row["status"] == "accepted":
+                    item["review_id"] = submission["review"]["id"]
+                    item["approved_versions"] = [v["version_id"] for v in submission["versions"]]
+            if size([*tasks, item]) > self.context_chars // 6:
+                state["more_tasks"] = True
+                break
+            tasks.append(item)
+        state["tasks"] = tasks
+        rows = self.db.execute("""SELECT m.id FROM team_messages m JOIN message_deliveries d ON d.message_id=m.id
+                                  WHERE m.team_id=? AND m.sender_id=? AND d.session_id=?
+                                  AND d.status IN ('completed','resolved') ORDER BY m.seq DESC""",
+                               (team_id, OPERATOR_ID, role))
+        for row in rows:
+            if scope and row["id"] in scope:
+                message = self.collaboration.get_message(team_id, actor, row["id"])
+                state["latest_handled_user_message"] = {k: message[k] for k in ("id", "kind", "text")}
+                break
+        return state
 
     async def _complete_model(self, role, turn_id, goal_id, messages, tools):
         token = model_request_context.set({"turn_id": turn_id, "goal_id": goal_id})
@@ -351,9 +396,12 @@ class Runtime:
                 message = json.loads(checkpoint["history"][0]["content"])["message"]
                 actor = self.workspace_tools.actor(role)
                 goal_id, history_scope = self.collaboration.goal_scope_for_message(actor.team_id, message["id"])
-                if history_scope is None and message["kind"] == "assignment":
+                if fork_message_id is not None:
+                    history_scope = {fork_message_id, message["id"]}
+                elif history_scope is None and message["kind"] == "assignment":
                     history_scope = {message["id"]}
             version_ids = check_scope()
+            trimmed_history = False
             if is_fork:
                 instructions += (
                     f"\n\nYou are the restricted assistant {role}. "
@@ -362,7 +410,8 @@ class Runtime:
                 )
                 prior_history = self.forks.model_history(role, turn.id)
             else:
-                prior_history = self._history(role, history_scope)
+                prior_history, trimmed_history = self._history(
+                    role, history_scope, budget=self.context_chars if scheduled else None)
             instructions += (f"\n\nReturn at most {MAX_TOOL_CALLS_PER_DECISION} tool calls in any single decision. "
                              "Split larger batches across decisions.")
             prior = [{"role": "system", "content": instructions}, *prior_history]
@@ -429,6 +478,16 @@ class Runtime:
                         f"The previous decision was discarded without execution because it exceeded the host limit "
                         f"of {MAX_TOOL_CALLS_PER_DECISION} tool calls. Replan within that limit."
                     )})
+                if scheduled and (trimmed_history or size(messages) > self.context_chars):
+                    if fork_message_id is not None:
+                        context_state = {"history_compacted": True, "fork_message_id": fork_message_id}
+                    else:
+                        context_state = self._context_state(actor.team_id, role, goal_id, history_scope)
+                    messages = bounded_messages(prior[0], prior_history, messages[len(prior):],
+                                                self.context_chars, context_state)
+                    with self.db:
+                        self._event(turn.id, "model.context_compacted", step=step + 1, chars=size(messages),
+                                    budget_chars=self.context_chars)
                 assistant = await self._complete_model(role, turn.id, goal_id, messages, tools)
                 self._check_generation(turn)
                 check_scope()
