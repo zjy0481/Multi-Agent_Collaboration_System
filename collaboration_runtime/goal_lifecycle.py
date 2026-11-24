@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Annotated, Literal
 from uuid import uuid4
 
-from pydantic import Field, ValidationError, model_validator
+from pydantic import Field, ValidationError, field_validator, model_validator
+from pydantic_core import PydanticCustomError
 
 from .artifacts import ArtifactError, ArtifactNotFound
 from .collaboration import (
@@ -21,6 +22,7 @@ from .collaboration import (
 )
 from .local_auth import OPERATOR_ID, Principal
 from .teams import TeamConflict, TeamNotFound
+from .validation_feedback import validation_feedback
 
 
 Version = Annotated[int, Field(ge=1, strict=True)]
@@ -39,14 +41,18 @@ class RequiredDeliveryInput(Command):
 class AcceptanceUpdateInput(Command):
     request_id: RequestId
     expected_revision: Version
-    required_deliveries: Annotated[list[RequiredDeliveryInput], Field(min_length=1, max_length=100)]
+    required_deliveries: Annotated[list[RequiredDeliveryInput], Field(
+        min_length=1, max_length=100,
+        description="One item per task_id; submit multiple files for a task through submit_result.",
+    )]
 
-    @model_validator(mode="after")
-    def unique_tasks(self):
-        task_ids = [item.task_id for item in self.required_deliveries]
+    @field_validator("required_deliveries")
+    @classmethod
+    def unique_tasks(cls, deliveries):
+        task_ids = [item.task_id for item in deliveries]
         if len(task_ids) != len(set(task_ids)):
-            raise ValueError("Each required delivery must name a distinct task")
-        return self
+            raise PydanticCustomError("duplicate_required_task", "Each required delivery must name a distinct task")
+        return deliveries
 
 
 class TerminalInput(Command):
@@ -111,7 +117,8 @@ TOOLS = {
     "get_goal": (GoalTool, "Read the goal and, as Lead, its close_preview with approvals, blockers and confirmation."),
     "update_goal_acceptance": (
         UpdateGoalAcceptanceTool,
-        "As Lead, publish a new required-delivery revision for an active goal.",
+        "As Lead, publish a new required-delivery revision for an active goal. Use one item per task_id; "
+        "submit multiple files through submit_result.",
     ),
     "close_goal": (
         CloseGoalTool,
@@ -1175,7 +1182,11 @@ class GoalLifecycle:
                     ActivateGoalInput(**args.model_dump(exclude={"goal_id"})),
                 )
             return {"ok": True, "result": result}
-        except ValidationError:
+        except ValidationError as exc:
+            errors = validation_feedback(exc, TOOLS[name][0])
+            if any(item["code"] == "duplicate_required_task" for item in errors):
+                return {"ok": False, "status": 422, "errors": errors,
+                        "error": "Use one required delivery per task_id; submit multiple files through submit_result"}
             return {"ok": False, "error": "Invalid goal tool arguments", "status": 422}
         except (TeamNotFound, TeamConflict, CollaborationForbidden, CollaborationInvalid) as exc:
             status = {TeamNotFound: 404, TeamConflict: 409,

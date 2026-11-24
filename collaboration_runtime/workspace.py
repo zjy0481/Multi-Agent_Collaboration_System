@@ -97,12 +97,14 @@ class SourceRecordArgs(TextWindowArgs):
 
 
 TOOLS = {
-    "read_file": (PathArgs, "Read a UTF-8 file from your private workspace."),
+    "read_file": (PathArgs, "Read a UTF-8 file from your private workspace using a workspace-relative POSIX path "
+                   "without the /workspace/ prefix."),
     "create_file": (WriteArgs, "Create a UTF-8 file in your private workspace."),
     "update_file": (WriteArgs, "Replace an existing UTF-8 file in your private workspace."),
     "delete_file": (PathArgs, "Delete a regular file in your private workspace."),
     "run_command": (CommandArgs, "Run a command or tests in your workspace. Pass exact artifact version IDs to import them read-only. "
                     "The sandbox has no external network. Use Python urllib.request for local HTTP tests. "
+                    "Use Python zipfile to inspect or extract ZIP archives. "
                     "Set measure_timings only when diagnosing sandbox latency."),
     "list_workspace_readers": (ToolArgs, "List eligible participants for your artifact publication."),
     "publish_artifact": (PublishArgs, "Publish a file snapshot to explicitly named readers. An artifact ID publishes the next version."),
@@ -338,6 +340,8 @@ class WorkspaceService:
     async def _execute(self, actor: Actor, name: str, args):
         workspace = actor.workspace_id
         if name == "read_file":
+            if args.path.startswith("/workspace/"):
+                raise SandboxError("Use a workspace-relative path without the /workspace/ prefix for read_file.")
             content = await asyncio.to_thread(self.sandbox.read_bytes, workspace, args.path)
             return {"path": args.path, "content": content.decode("utf-8")}
         if name in {"create_file", "update_file"}:

@@ -705,3 +705,20 @@ def test_scheduler_deadline_expiry_writes_trusted_timed_out_fact(tmp_path):
         assert state["terminal"]["host_event_key"].startswith(f"deadline:{expired['goal_id']}:")
         assert "宿主策略 host_policy" in state["terminal"]["evidence"][0]
         assert not any("Persisted deadline" in item for item in model.inputs)
+
+
+def test_duplicate_required_task_tool_feedback(tmp_path):
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens, goal_id = context(client)
+        task = register(client, base, lead["member_id"], tokens, goal_id,
+                        others[0]["member_id"], others[1]["member_id"])
+        body = {"request_id": key(), "goal_id": goal_id, "expected_revision": 1,
+                "required_deliveries": [{"name": "one", "task_id": task},
+                                        {"name": "two", "task_id": task}]}
+        result = client.portal.call(client.app.state.collaboration.execute_tool, lead["session_id"],
+                                    "update_goal_acceptance", json.dumps(body))
+        assert result["status"] == 422
+        assert "one required delivery per task_id" in result["error"]
+        assert "submit_result" in result["error"] and task not in str(result)
+        assert result["errors"] == [{"path": ["required_deliveries"], "code": "duplicate_required_task"}]
+        assert lifecycle(client, base, tokens[lead["member_id"]], goal_id)["acceptance"]["revision"] == 1

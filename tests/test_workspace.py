@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import httpx
 
-from collaboration_runtime.sandbox import SandboxError
+from collaboration_runtime.sandbox import SandboxError, DockerSandbox
 from collaboration_runtime.search import SearchClient
 from collaboration_runtime.teams import LeadDecision, TeamService
 from collaboration_runtime.workspace import WorkspaceService
@@ -28,6 +28,7 @@ class MemorySandbox:
         files[path] = content
 
     def read_bytes(self, workspace_id, path):
+        DockerSandbox._path(path)
         try:
             return self.files[workspace_id][path]
         except KeyError:
@@ -80,6 +81,14 @@ def test_workspace_acl_assistant_versions_and_search(tmp_path):
             return await service.execute(actor, tool, json.dumps(args))
 
         assert (await call(dev, 'create_file', path='report.txt', content='old'))['ok']
+        absolute = await call(dev, 'read_file', path='/workspace/report.txt')
+        assert not absolute['ok'] and 'without the /workspace/ prefix' in absolute['error']
+        assert (await call(dev, 'read_file', path='report.txt'))['result']['content'] == 'old'
+        assert (await call(dev, 'read_file', path='/other/report.txt'))['error'] == 'path must stay inside the workspace'
+        assert (await call(dev, 'read_file', path='missing.txt'))['error'] == 'file not found'
+        descriptions = {tool['function']['name']: tool['function']['description'] for tool in service.tools_for(dev)}
+        assert 'zipfile' in descriptions['run_command']
+        assert 'workspace-relative' in descriptions['read_file']
         assert not (await call(dev, 'publish_artifact', path='report.txt', reader_session_ids=[outsider]))['ok']
         assert not (await call(outsider, 'read_file', path='report.txt'))['ok']
         old = (await call(dev, 'publish_artifact', path='report.txt', reader_session_ids=[qa]))['result']
