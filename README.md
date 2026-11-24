@@ -32,7 +32,7 @@ if (-not (Test-Path -LiteralPath '.env')) {
 | `opencode` | `OPENCODE_API_KEY` | 默认 OpenCode Go 的 `deepseek-v4.1-flash`，可修改 `[opencode].model` |
 
 - OpenCode 使用 [Go 订阅的 Console API](https://opencode.ai/docs/console/go/)，不调用 OpenCode CLI。请使用 Go 工作区的 Key，以及支持 Chat Completions 和工具调用的模型；默认 DeepSeek 模型可能需要管理员在 Console 隐私设置中允许 `Global` 区域。
-- DeepSeek 模型请求显式关闭思考模式，以兼容含已有工具调用的会话历史。运行记录区分 `course`、`deepseek` 和 `opencode`；`COLLABORATION_MODEL_MODE=course` 是兼容旧配置的联网模式，会读取 `llm.toml`，设为 `mock` 则始终离线。缺少所选 Key 时启动报错，不会换用其他供应商。
+- OpenCode Go 的 `deepseek-v4.1-flash` 启用思考，强度为 `max`。DeepSeek 官方 API 和 OpenCode Go 上的其他 DeepSeek 模型显式关闭思考模式。运行记录区分 `course`、`deepseek` 和 `opencode`。`COLLABORATION_MODEL_MODE=course` 是兼容旧配置的联网模式，会读取 `llm.toml`，设为 `mock` 则始终离线。缺少所选 Key 时启动报错，不会换用其他供应商。
 - 切换后，新供应商可能收到既有会话历史。建议先结束进行中的回合；若不希望转发旧会话，可用新的 `COLLABORATION_STATE_DIR` 启动。课程 HKGAI 专项测试仍需选择 `hkgai`。
 
 ### 配置回合步数上限

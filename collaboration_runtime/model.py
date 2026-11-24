@@ -21,9 +21,10 @@ from dotenv import dotenv_values
 
 PROJECT_ENV = Path(__file__).resolve().parents[1] / ".env"
 COURSE_SETTINGS = ("COURSE_API_BASE_URL", "COURSE_API_MODEL", "COURSE_API_KEY")
+OPENCODE_DEEPSEEK_FLASH_MODEL = "deepseek-v4.1-flash"
 PROVIDER_SETTINGS = {
     "deepseek": ("https://api.deepseek.com", "deepseek-flash", "DEEPSEEK_API_KEY"),
-    "opencode": ("https://opencode.ai/inference/go/openai/v1", "deepseek-v4.1-flash", "OPENCODE_API_KEY"),
+    "opencode": ("https://opencode.ai/inference/go/openai/v1", OPENCODE_DEEPSEEK_FLASH_MODEL, "OPENCODE_API_KEY"),
 }
 PROVIDER_LABELS = {"course": "Course API", "deepseek": "DeepSeek API", "opencode": "OpenCode Go API"}
 logger = logging.getLogger(__name__)
@@ -138,8 +139,8 @@ class ChatCompletionsModel:
             raise ModelError(f"{self._label} key is required")
         if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not math.isfinite(timeout) or timeout <= 0:
             raise ModelError(f"{self._label} timeout must be a positive finite number")
+        self._mode = mode
         self._model = model.strip()
-        self._disable_thinking = mode == "deepseek" or (mode == "opencode" and self._model.startswith("deepseek-"))
         self.paused_reason: str | None = None
         parts = urlsplit(self._url)
         self.identity = {"mode": mode, "endpoint": urlunsplit((parts.scheme, parts.netloc, "", "", "")), "model": self._model}
@@ -160,7 +161,10 @@ class ChatCompletionsModel:
         payload = {"model": self._model, "messages": messages}
         if tools:
             payload["tools"] = tools
-        if self._disable_thinking:
+        if self._mode == "opencode" and self._model == OPENCODE_DEEPSEEK_FLASH_MODEL:
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = "max"
+        elif self._mode == "deepseek" or (self._mode == "opencode" and self._model.startswith("deepseek-")):
             payload["thinking"] = {"type": "disabled"}
         for attempt in range(3):
             if self.paused_reason is not None:
