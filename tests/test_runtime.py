@@ -4,6 +4,7 @@ import json
 import threading
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
@@ -67,6 +68,64 @@ def wait_for_terminal(client, role, turn_id):
             return data
         time.sleep(0.02)
     raise AssertionError("turn did not reach a terminal state")
+
+
+def test_overflow_replans_without_executing_rejected_calls(tmp_path):
+    class Model:
+        def __init__(self):
+            self.calls = []
+
+        async def complete(self, messages, tools):
+            self.calls.append(copy.deepcopy(messages))
+            count = 9 if len(self.calls) == 1 else 8 if len(self.calls) == 2 else 0
+            if not count:
+                return {"role": "assistant", "content": "done"}
+            return {"role": "assistant", "content": None, "tool_calls": [
+                {"id": f"{len(self.calls)}-{i}", "type": "function", "function": {
+                    "name": "run_command", "arguments": json.dumps({"command": str(i)})}}
+                for i in range(count)]}
+
+    model = Model()
+    sandbox = ControlledSandbox()
+    sandbox.release.set()
+    with TestClient(create_app(model=model, sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token')) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
+        turn = client.post('/v1/sessions/developer/turns', json={"text": "work"}).json()['turn_id']
+        assert wait_for_terminal(client, 'developer', turn)['status'] == 'completed'
+    assert len(sandbox.commands) == 8
+    assert 'discarded without execution' in json.dumps(model.calls[1])
+    assert not any(m.get('tool_calls') for m in model.calls[1])
+    assert 'discarded' not in json.dumps(model.calls[2])
+    assert [m['tool_call_id'] for m in model.calls[2] if m.get('role') == 'tool'] == [f'2-{i}' for i in range(8)]
+
+
+@pytest.mark.parametrize(("max_steps", "expected_calls", "error"), [
+    (20, 2, "too many tools"),
+    (1, 1, "step limit"),
+])
+def test_overflow_respects_replan_and_step_limits(tmp_path, monkeypatch, max_steps, expected_calls, error):
+    monkeypatch.setattr("collaboration_runtime.api.read_llm_config", lambda: {"runtime": {"max_steps": max_steps}})
+
+    class Model:
+        calls = 0
+
+        async def complete(self, messages, tools):
+            self.calls += 1
+            return {"role": "assistant", "content": None, "tool_calls": [
+                {"id": str(i), "type": "function", "function": {
+                    "name": "run_command", "arguments": '{"command":"never"}'}}
+                for i in range(9)]}
+
+    model = Model()
+    sandbox = ControlledSandbox()
+    with TestClient(create_app(model=model, sandbox=sandbox, state_dir=tmp_path, operator_token='test-operator-token')) as client:
+        client.headers.update({"Authorization": "Bearer test-operator-token"})
+        turn = client.post('/v1/sessions/developer/turns', json={"text": "work"}).json()['turn_id']
+        result = wait_for_terminal(client, 'developer', turn)
+    assert result['status'] == 'failed'
+    assert error in result['error']
+    assert model.calls == expected_calls
+    assert not sandbox.commands
 
 
 def test_steer_during_tool_execution_and_isolated_event_stream(tmp_path):
