@@ -6,11 +6,18 @@ import time
 from urllib.parse import urlsplit
 
 import pytest
+from dotenv import dotenv_values
 from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
 from collaboration_runtime.model import load_model
+from collaboration_runtime.search import PROJECT_ENV
 from test_collaboration import OPERATOR, Sandbox, app, auth, bootstrap, send, setup_team, snapshot
+
+
+def exa_configured():
+    values = dotenv_values(PROJECT_ENV, encoding="utf-8-sig", interpolate=False)
+    return bool((os.environ.get("EXA_API_KEY", values.get("EXA_API_KEY")) or "").strip())
 
 
 @pytest.mark.skipif(
@@ -30,7 +37,7 @@ def test_live_search_records_reopen_with_the_same_sources(tmp_path):
         assert outcome["ok"], outcome["error"] if not outcome["ok"] else ""
         record = outcome["result"]
         assert record["results"], "The approved provider returned no usable sources"
-        if os.environ.get("EXA_API_KEY", "").strip():
+        if exa_configured():
             assert record["provider"] == "exa", record["fallback_reason"]
         assert all(result["title"] and urlsplit(result["url"]).hostname for result in record["results"])
 
@@ -96,7 +103,7 @@ def test_live_course_model_searches_retrieves_and_reports(tmp_path):
         assert all(result["ok"] for result in (search_result, reopen_result, post_result))
         record = search_result["result"]
         assert record["results"], "Approved source returned no usable results"
-        if os.environ.get("EXA_API_KEY", "").strip():
+        if exa_configured():
             assert record["provider"] == "exa", record["fallback_reason"]
         assert reopen_result["result"] == record
         reopen_args = json.loads(json.loads(reopened["arguments"]))

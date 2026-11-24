@@ -68,7 +68,7 @@ class SearchClient:
         except (OSError, UnicodeError):
             raise SearchError("Could not read the project .env as UTF-8") from None
         endpoint = (os.environ.get("COURSE_SEARCH_URL", values.get("COURSE_SEARCH_URL")) or "").strip() or None
-        exa_api_key = (os.environ.get("EXA_API_KEY") or "").strip()
+        exa_api_key = (os.environ.get("EXA_API_KEY", values.get("EXA_API_KEY")) or "").strip() or None
         if not endpoint and not exa_api_key:
             return None
         api_key = os.environ.get("COURSE_SEARCH_API_KEY", values.get("COURSE_SEARCH_API_KEY")) or None

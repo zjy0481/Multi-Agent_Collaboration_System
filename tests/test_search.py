@@ -135,9 +135,13 @@ def test_dotenv_load_and_provider_auth_errors_do_not_fallback(tmp_path, monkeypa
     run(check())
 
 
-def test_exa_from_process_environment_wins_and_maps_highlights(tmp_path, monkeypatch):
-    monkeypatch.setattr("collaboration_runtime.search.PROJECT_ENV", tmp_path / "missing.env")
-    monkeypatch.setenv("EXA_API_KEY", " exa-test ")
+@pytest.mark.parametrize(("process_key", "expected_key"), [(None, "file-test"), (" exa-test ", "exa-test")])
+def test_exa_config_precedence_and_highlights(tmp_path, monkeypatch, process_key, expected_key):
+    env_file = tmp_path / ".env"
+    env_file.write_text("EXA_API_KEY=' file-test '\n", encoding="utf-8-sig")
+    monkeypatch.setattr("collaboration_runtime.search.PROJECT_ENV", env_file)
+    if process_key is not None:
+        monkeypatch.setenv("EXA_API_KEY", process_key)
     monkeypatch.setenv("COURSE_SEARCH_URL", "http://127.0.0.1:8888/search")
     monkeypatch.setenv("COURSE_SEARCH_API_KEY", "fallback-test")
     calls = []
@@ -145,7 +149,7 @@ def test_exa_from_process_environment_wins_and_maps_highlights(tmp_path, monkeyp
     def handler(request):
         calls.append(request)
         assert str(request.url) == EXA_SEARCH_URL and request.method == "POST"
-        assert request.headers["x-api-key"] == "exa-test"
+        assert request.headers["x-api-key"] == expected_key
         assert "authorization" not in request.headers
         assert json.loads(request.content) == {"query": "official source", "numResults": 1,
                                                "contents": {"highlights": True}}
@@ -157,6 +161,7 @@ def test_exa_from_process_environment_wins_and_maps_highlights(tmp_path, monkeyp
 
     async def check():
         client = SearchClient.from_env()
+        assert os.environ.get("EXA_API_KEY") == process_key
         await client.aclose()
         client._client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         try:
