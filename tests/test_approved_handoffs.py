@@ -105,3 +105,18 @@ def test_waiting_dependency_blocks_formal_submission(tmp_path):
         basis = client.portal.call(lambda: db.execute(
             "SELECT outputs FROM task_dependency_basis WHERE submission_id=?", (actual["submission_id"],)).fetchone()[0])
         assert json.loads(basis) == {up: [source["version_id"]]}
+
+        # A pre-upgrade submission has its normal immutable record but no captured input basis.
+        def simulate_legacy_record():
+            with db:
+                db.execute("DELETE FROM task_dependency_basis WHERE submission_id=?", (actual["submission_id"],))
+        client.portal.call(simulate_legacy_record)
+        history = ok(client.get(down_url, headers=auth(tokens[lid])))
+        assert history["status"] == "needs_recheck"
+        assert history["result"]["submissions"][0]["id"] == actual["submission_id"]
+        denied = review(client, down_url, tokens[lid], actual["submission_id"], decision())
+        assert denied.status_code == 409 and "basis" in denied.text.lower()
+        ok(review(client, down_url, tokens[lid], actual["submission_id"], decision("returned")))
+        corrected = publish(client, base, qa, [lead], b"confirmed against approved source", draft["artifact_id"])
+        replacement = ok(submit(client, down_url, tokens[qid], submission(corrected)))
+        ok(review(client, down_url, tokens[lid], replacement["submission_id"], decision()))

@@ -136,13 +136,15 @@ class TaskResults:
                 if dep not in handoff["dependency_blockers"]}
 
     def _dependencies_ready(self, task, submission=None):
+        if not task["terms"]["dependency_ids"]:
+            return True
         outputs = self._owner_outputs(task)
         if set(task["terms"]["dependency_ids"]) != outputs.keys():
             return False
         if submission is not None:
             basis = self.db.execute("SELECT outputs FROM task_dependency_basis WHERE submission_id=?",
                                     (submission["id"],)).fetchone()
-            if basis and json.loads(basis["outputs"]) != outputs:
+            if basis is None or json.loads(basis["outputs"]) != outputs:
                 return False
         return True
 
@@ -456,7 +458,8 @@ class TaskResults:
                 raise TeamConflict("Task inputs require rechecking before submitting or reviewing")
             pending = self._latest(task_id, task["revision"]) if reviewing else None
             if (not reviewing or body.decision == "approved") and not self._dependencies_ready(task, pending):
-                raise TeamConflict("Upstream dependencies need current approval and readable granted outputs")
+                raise TeamConflict("Upstream dependencies need current approval and readable granted outputs. "
+                                   "For a submission with a missing or changed dependency basis, return it for recheck.")
             if reviewing:
                 receipt = self._review(task, actor, members, team["lead_member_id"], submission_id, body)
             else:
