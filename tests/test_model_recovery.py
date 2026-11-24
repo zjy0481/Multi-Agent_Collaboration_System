@@ -213,13 +213,15 @@ def test_operator_resumes_step_limit_without_replaying_tools(tmp_path):
     from test_collaboration import OPERATOR, auth, send, setup_team
     from test_scheduler import Sandbox, application, turns, wait_until
 
+    step_limit = 20
+
     class StepModel:
         def __init__(self):
             self.calls = 0
 
         async def complete(self, messages, tools):
             self.calls += 1
-            if self.calls <= 12:
+            if self.calls <= step_limit:
                 return {'role': 'assistant', 'content': None, 'tool_calls': [
                     {'id': f'command-{self.calls}', 'type': 'function', 'function': {
                         'name': 'run_command', 'arguments': json.dumps({'command': str(self.calls)})}}]}
@@ -233,10 +235,10 @@ def test_operator_resumes_step_limit_without_replaying_tools(tmp_path):
         failed = wait_until(lambda: next((t for t in turns(client, lead['session_id'], tokens[lead['member_id']])
                                          if t['status'] == 'failed'), None), timeout=10)
         endpoint = f"/v1/sessions/{lead['session_id']}/turns/{failed['turn_id']}/retry"
-        assert len(sandbox.commands) == 12
+        assert len(sandbox.commands) == step_limit
         assert client.post(endpoint, headers=auth(OPERATOR)).status_code == 202
         completed = wait_until(lambda: next((t for t in turns(client, lead['session_id'], tokens[lead['member_id']])
                                             if t['status'] == 'completed'), None), timeout=10)
         assert completed['turn_id'] == failed['turn_id']
-        assert len(sandbox.commands) == 12 and model.calls == 13
+        assert len(sandbox.commands) == step_limit and model.calls == step_limit + 1
         assert client.post(endpoint, headers=auth(OPERATOR)).status_code == 202
