@@ -19,6 +19,19 @@ import pytest
 from collaboration_runtime.sandbox import MUTATE_WORKSPACE_FILE, SandboxError
 
 
+def test_missing_curl_suggests_local_python_and_host_search(tmp_path, monkeypatch):
+    sandbox = DockerSandbox(tmp_path)
+    program = "import sys; print('/bin/sh: curl: not found', file=sys.stderr); sys.exit(127)"
+    monkeypatch.setattr(sandbox, "_base", lambda *args: [sys.executable, "-c", program])
+
+    with pytest.raises(SandboxError) as exc:
+        sandbox.run("developer", "curl http://127.0.0.1:8000")
+
+    message = str(exc.value)
+    assert "exit 127" in message and "curl: not found" in message
+    assert "urllib.request" in message and "search_web and read_source" in message
+
+
 @pytest.mark.parametrize(("mode", "exit_code", "message"), [
     ("create", 41, "workspace file already exists"),
     ("update", 42, "workspace file not found"),

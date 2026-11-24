@@ -102,6 +102,7 @@ TOOLS = {
     "update_file": (WriteArgs, "Replace an existing UTF-8 file in your private workspace."),
     "delete_file": (PathArgs, "Delete a regular file in your private workspace."),
     "run_command": (CommandArgs, "Run a command or tests in your workspace. Pass exact artifact version IDs to import them read-only. "
+                    "The sandbox has no external network. Use Python urllib.request for local HTTP tests. "
                     "Set measure_timings only when diagnosing sandbox latency."),
     "list_workspace_readers": (ToolArgs, "List eligible participants for your artifact publication."),
     "publish_artifact": (PublishArgs, "Publish a file snapshot to explicitly named readers. An artifact ID publishes the next version."),
