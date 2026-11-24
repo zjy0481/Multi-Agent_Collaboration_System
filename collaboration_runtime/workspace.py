@@ -314,6 +314,14 @@ class WorkspaceService:
             return {"ok": False, "error": error, "errors": validation_feedback(exc, TOOLS[name][0])}
         except UnicodeError:
             return {"ok": False, "error": "This tool requires UTF-8 text; use a read-only artifact mount for binary files"}
+        except ArtifactNotFound as exc:
+            if name in {"read_artifact", "run_command"}:
+                return {"ok": False, "error": (
+                    "Artifact version not found. Check the ID with list_artifacts. Ask an authorized publisher "
+                    "to use publish_artifact with your session in reader_session_ids and send you the new version_id. "
+                    "If you are an assistant, ask your parent to hand the version off to you."
+                )}
+            return {"ok": False, "error": str(exc)}
         except (WorkspaceNotFound, ArtifactError, SearchError, SandboxError) as exc:
             return {"ok": False, "error": str(exc)}
 

@@ -345,12 +345,17 @@ class DelegationService:
         declared.update(row["version_id"] for row in self.db.execute(
             "SELECT version_id FROM assignment_required_inputs WHERE message_id = ? AND owner_id = ?",
             (record["source_message_id"], terms["owner_id"])))
+        share_input = ("Ask an authorized publisher to use publish_artifact with reader_session_ids for all "
+                       "commitment parties, then use the returned version_id in input_version_ids.")
         for version_id in sorted(set(terms["input_version_ids"]) | declared):
-            readers = self.artifacts.reference_readers(team_id, version_id)
+            try:
+                readers = self.artifacts.reference_readers(team_id, version_id)
+            except ArtifactNotFound:
+                readers = set()
             if actor.session_id not in readers:
-                raise TeamNotFound("Input version not found")
+                raise TeamNotFound(f"Input version not found. Check the ID with list_artifacts. {share_input}")
             if any(member.session_id not in readers for member in participants):
-                raise CollaborationForbidden("An input version is not shared with every commitment party")
+                raise CollaborationForbidden(f"An input version is not shared with every commitment party. {share_input}")
         missing = sorted(declared - set(terms["input_version_ids"]))
         if missing:
             raise CollaborationInvalid("Missing required input version IDs: " + ", ".join(missing))
@@ -377,14 +382,20 @@ class DelegationService:
                 raise CollaborationForbidden("Draft commitments include a party outside the assistant grant")
 
     def _validate_links(self, team_id, participants, record):
+        invisible_link = ("Linked task not found. Check the ID with list_delegation. Every commitment party "
+                          "must be able to read the linked task. Ask its dispatcher to coordinate access "
+                          "or revise the link and agree on an explicitly shared artifact version.")
         for field in ("parent_task_id", "dependency_ids"):
             pending = list(self._links(record["terms"], field))
             for task_id in pending:
-                target = self._task(team_id, task_id)
+                try:
+                    target = self._task(team_id, task_id)
+                except TeamNotFound:
+                    raise TeamNotFound(invisible_link) from None
+                if any(not self._can_read(team_id, member, target) for member in participants):
+                    raise TeamNotFound(invisible_link)
                 if target["goal_id"] != record["goal_id"]:
                     raise CollaborationInvalid("Task links must stay within the same goal")
-                if any(not self._can_read(team_id, member, target) for member in participants):
-                    raise TeamNotFound("Linked task not found")
             visited = set()
             while pending:
                 task_id = pending.pop()

@@ -184,6 +184,15 @@ def test_authorization_cross_team_and_cycles(tmp_path):
         assert action(client, pid, foreign, 'confirm').status_code == 404
         confirm_all(client, pid, tokens)
         first = ok(action(client, pid, tokens[leader], 'assign'))['task_id']
+
+        def link_error(link):
+            return client.post(f'{base}/proposals', headers=auth(tokens[leader]), json={
+                'request_id': key(), 'goal_id': goal, 'scope_id': key(),
+                'terms': terms(outsider, leader, dependency_ids=[link])})
+        denied, missing = link_error(first), link_error(key())
+        assert denied.status_code == missing.status_code == 404
+        assert denied.json() == missing.json()
+        assert 'commitment party' in denied.json()['detail']
         child = create(client, base, tokens[leader], goal, terms(a, b, parent_task_id=first, dependency_ids=[first]))
         child_id = child.get('proposal_id', child.get('id'))
         confirm_all(client, child_id, tokens)
@@ -288,7 +297,29 @@ def test_private_goal_and_artifact_references_keep_their_audiences(tmp_path):
         ))
         body = {'request_id': key(), 'goal_id': goal, 'scope_id': key(),
                 'terms': terms(owner_id, reviewer_id, input_version_ids=[version['version_id']])}
-        assert client.post(f'{base}/proposals', headers=auth(tokens[lead_id]), json=body).status_code == 403
+        denied = client.post(f'{base}/proposals', headers=auth(tokens[lead_id]), json=body)
+        assert denied.status_code == 403 and 'publish_artifact' in denied.json()['detail']
+
+        review_headers = auth(tokens[reviewer_id])
+        hidden = client.post(f'{base}/proposals', headers=review_headers, json=body)
+        missing_body = {**body, 'terms': terms(owner_id, reviewer_id, input_version_ids=[key()])}
+        missing = client.post(f'{base}/proposals', headers=review_headers, json=missing_body)
+        assert hidden.status_code == missing.status_code == 404
+        assert hidden.json() == missing.json() and 'list_artifacts' in hidden.json()['detail']
+
+        def work(member, name, **args):
+            return client.portal.call(client.app.state.workspace.execute, member['session_id'], name, json.dumps(args))
+
+        revised = client.portal.call(partial(
+            client.app.state.workspace.artifacts.publish, team_id=base.rsplit('/', 1)[-1],
+            author_session_id=lead['session_id'], source_path='input.txt', content=b'private artifact',
+            artifact_id=version['artifact_id'], reader_session_ids=[owner['session_id'], reviewer['session_id']],
+        ))
+        assert revised['sha256'] == version['sha256'] and revised['version_id'] != version['version_id']
+        assert not work(reviewer, 'read_artifact', version_id=version['version_id'])['ok']
+        assert work(reviewer, 'read_artifact', version_id=revised['version_id'])['result']['content'] == 'private artifact'
+        body['terms']['input_version_ids'] = [revised['version_id']]
+        assert ok(client.post(f'{base}/proposals', headers=auth(tokens[lead_id]), json=body))['status'] == 'open'
 
         draft = create(client, base, tokens[lead_id], goal, terms(owner_id, owner_id,
                        input_version_ids=[version['version_id']]))
