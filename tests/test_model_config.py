@@ -36,7 +36,7 @@ def test_opencode_retry_preserves_session_and_payload():
                 return httpx.Response(503)
             return httpx.Response(200, json={'choices': [{'message': {'role': 'assistant', 'content': 'ok'}}]})
 
-        model = OpenCodeModel('https://example.invalid', 'deepseek-test', 'test-key')
+        model = OpenCodeModel('https://example.invalid', 'deepseek-v4.1-flash', 'test-key')
         await model._client.aclose()
         model._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
         try:
@@ -45,7 +45,8 @@ def test_opencode_retry_preserves_session_and_payload():
             assert len(requests) == 2
             assert requests[0] == requests[1]
             assert requests[0][0].startswith('ses_')
-            assert requests[0][1]['thinking'] == {'type': 'disabled'}
+            assert requests[0][1]['thinking'] == {'type': 'enabled'}
+            assert requests[0][1]['reasoning_effort'] == 'max'
         finally:
             await model.aclose()
     asyncio.run(check())
@@ -137,6 +138,7 @@ def test_provider_config_routes_the_runtime_tool_loop(tmp_path, monkeypatch, pro
     monkeypatch.setattr("collaboration_runtime.model.PROJECT_ENV", env_file)
     monkeypatch.setattr("collaboration_runtime.search.PROJECT_ENV", env_file)
     monkeypatch.setenv("COURSE_SEARCH_URL", "")
+    monkeypatch.delenv("EXA_API_KEY", raising=False)
     if provider == "opencode":
         monkeypatch.setenv(key_name, "environment-key")
     requests = []
@@ -156,6 +158,8 @@ def test_provider_config_routes_the_runtime_tool_loop(tmp_path, monkeypatch, pro
                     "name": "run_command", "arguments": '{"command":"echo hello"}',
                 },
             }]}
+            if provider == "opencode":
+                message["reasoning_content"] = "test-reasoning"
         else:
             message = {"role": "assistant", "content": "Finished"}
         return httpx.Response(200, json={"choices": [{"message": message}]})
@@ -192,7 +196,12 @@ def test_provider_config_routes_the_runtime_tool_loop(tmp_path, monkeypatch, pro
     for request, payload in requests:
         assert str(request.url) == url
         assert payload["model"] == model_id
-        assert payload["thinking"] == {"type": "disabled"}
+        if provider == "opencode":
+            assert payload["thinking"] == {"type": "enabled"}
+            assert payload["reasoning_effort"] == "max"
+        else:
+            assert payload["thinking"] == {"type": "disabled"}
+            assert "reasoning_effort" not in payload
         assert request.headers["Authorization"] == f"Bearer {expected_key}"
     assert any(tool["function"]["name"] == "run_command" for tool in requests[0][1]["tools"])
     tool_message, = [message for message in requests[1][1]["messages"] if message["role"] == "tool"]
@@ -200,6 +209,8 @@ def test_provider_config_routes_the_runtime_tool_loop(tmp_path, monkeypatch, pro
     assert json.loads(tool_message["content"])["result"]["stdout"] == "tool-result"
     sessions = [request.headers.get("x-opencode-session") for request, _ in requests]
     if provider == "opencode":
+        assistant, = [message for message in requests[1][1]["messages"] if message["role"] == "assistant"]
+        assert assistant["reasoning_content"] == "test-reasoning"
         assert all(sessions) and sessions[0] == sessions[1] and len(set(sessions)) == 3
         assert all(request.headers["user-agent"].startswith("multi-agent-collaboration/") for request, _ in requests)
     else:
@@ -302,3 +313,57 @@ def test_request_diagnostics_are_correlated_and_exclude_content(caplog):
     assert record.duration_ms >= 0
     assert record.usage == {"prompt_tokens": 10, "total_tokens": 12, "cached_tokens": 3, "reasoning_tokens": 1}
     assert "private" not in str(record.__dict__) and "secret" not in str(record.__dict__)
+
+@pytest.mark.parametrize(("mode", "model_id", "thinking", "effort"), [
+    ("opencode", "deepseek-v4.1-flash", {"type": "enabled"}, "max"),
+    ("opencode", "deepseek-v4.1-flash-other", {"type": "disabled"}, None),
+    ("opencode", "other-model", None, None),
+    ("deepseek", "deepseek-v4.1-flash", {"type": "disabled"}, None),
+    ("course", "deepseek-v4.1-flash", None, None),
+])
+def test_thinking_selection_is_scoped_to_exact_route(mode, model_id, thinking, effort):
+    from collaboration_runtime.model import ChatCompletionsModel
+
+    async def check():
+        payloads = []
+        def respond(request):
+            payloads.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+        model = ChatCompletionsModel("https://example.invalid", model_id, "key", mode=mode)
+        await model._client.aclose()
+        model._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        try:
+            await model.complete([{"role": "user", "content": "hello"}], [])
+            assert payloads[0].get("thinking") == thinking
+            assert payloads[0].get("reasoning_effort") == effort
+        finally:
+            await model.aclose()
+    asyncio.run(check())
+
+
+def test_compacted_tool_exchange_replays_reasoning_to_opencode():
+    from collaboration_runtime.context_window import bounded_messages
+    system = {"role": "system", "content": "system"}
+    decision = {"role": "assistant", "content": None, "reasoning_content": "reasoning survives",
+                "tool_calls": [{"id": "call-1", "type": "function", "function": {
+                    "name": "lookup", "arguments": "{}"}}]}
+    current = [{"role": "user", "content": "question"}, decision,
+               {"role": "tool", "tool_call_id": "call-1", "content": "x" * 4000}]
+    compacted = bounded_messages(system, [], current, 2000, None)
+    assert len(compacted[-1]["content"]) < 4000
+
+    async def check():
+        payloads = []
+        def respond(request):
+            payloads.append(json.loads(request.content))
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": "ok"}}]})
+        model = OpenCodeModel("https://example.invalid", "deepseek-v4.1-flash", "key")
+        await model._client.aclose()
+        model._client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        try:
+            await model.complete(compacted, [])
+            assert payloads[0]["messages"][-2]["reasoning_content"] == "reasoning survives"
+            assert payloads[0]["messages"][-1]["tool_call_id"] == "call-1"
+        finally:
+            await model.aclose()
+    asyncio.run(check())
