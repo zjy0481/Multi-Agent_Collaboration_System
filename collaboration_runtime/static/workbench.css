@@ -301,3 +301,7 @@ small {
 [hidden] {
   display: none !important;
 }
+
+.delivery-row { border-top: 1px solid #d7dee8; padding: .75rem 0; }
+.delivery-row p { overflow-wrap: anywhere; margin: .35rem 0; }
+.delivery-row textarea, .delivery-row input { box-sizing: border-box; width: 100%; margin: .25rem 0; }
