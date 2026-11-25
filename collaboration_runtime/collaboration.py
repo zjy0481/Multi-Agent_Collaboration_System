@@ -52,6 +52,7 @@ class MessageInput(MessageFields):
     kind: Literal["chat", "progress", "assignment", "supplement", "correction"] = "chat"
     required_inputs: Annotated[list[RequiredInput], Field(default_factory=list, max_length=100)]
     assignment_guidance: Annotated[str, StringConstraints(max_length=4000)] | None = None
+    steer_active: bool = False
 
 
 class GoalInput(Command):
@@ -160,6 +161,12 @@ class CollaborationService:
                 status TEXT NOT NULL DEFAULT 'pending',
                 PRIMARY KEY (event_id, session_id, purpose)
             );
+            CREATE TABLE IF NOT EXISTS supplement_inputs (
+                message_id TEXT NOT NULL, session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+                status TEXT NOT NULL, PRIMARY KEY(message_id, session_id)
+            );
+            CREATE INDEX IF NOT EXISTS supplement_inputs_queued_turn ON supplement_inputs(turn_id)
+                WHERE status = 'queued';
             CREATE INDEX IF NOT EXISTS message_deliveries_inbox ON message_deliveries(session_id, status, event_id);
             CREATE TABLE IF NOT EXISTS human_questions (
                 question_id TEXT PRIMARY KEY REFERENCES team_messages(id),
@@ -372,6 +379,8 @@ class CollaborationService:
             digest_body.pop("goal_id")
         if body.assignment_guidance is None:
             digest_body.pop("assignment_guidance")
+        if not body.steer_active:
+            digest_body.pop("steer_active")
         digest = self._digest({**digest_body, "mentions": mentions})
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
@@ -441,8 +450,20 @@ class CollaborationService:
                 raise CollaborationForbidden("Only the user can declare required inputs on an assignment")
             if any(rule.owner_id not in members for rule in body.required_inputs):
                 raise CollaborationInvalid("Required input owner must be a formal team member")
+            if body.steer_active and (not actor.is_operator or body.kind != "supplement" or recipient is not None):
+                raise CollaborationInvalid("Active input is only available for group supplements")
             if body.kind == "supplement" and (not source or source["kind"] != "assignment"):
                 raise CollaborationInvalid("A supplement must reference the original assignment")
+            steer_goal = None
+            if body.steer_active:
+                goal_id = self.goal_for_message(team_id, source["id"])
+                if goal_id is not None:
+                    status = self.db.execute("SELECT status FROM team_goals WHERE id=? AND team_id=?",
+                                             (goal_id, team_id)).fetchone()["status"]
+                    if status not in {"active", "queued"}:
+                        raise TeamConflict("Goal is no longer active")
+                    if status == "active":
+                        steer_goal = goal_id
             if body.kind == "correction":
                 targets = [recipient] if recipient in members else mentions
                 if not source or len(targets) != 1:
@@ -476,6 +497,15 @@ class CollaborationService:
                         targets = [team["lead_member_id"]]
                 purpose = "message.correction" if body.kind == "correction" else "message"
                 self._deliver(receipt, (members[target] for target in targets), purpose)
+                if body.steer_active:
+                    receipt['active_input'] = []
+                    for target in targets:
+                        session = members[target]
+                        queued = bool(steer_goal and getattr(self, 'runtime', None) and
+                                      self.runtime.queue_supplement(session, steer_goal, receipt, body.text))
+                        if not queued:
+                            self.db.execute("INSERT INTO supplement_inputs VALUES (?, ?, '', 'fallback')", (receipt['message_id'], session))
+                        receipt['active_input'].append({'member_id': target, 'status': 'queued' if queued else 'fallback'})
             self._save_receipt(key, digest, receipt)
             return receipt
 
@@ -650,6 +680,25 @@ class CollaborationService:
             return None
         return seq
 
+    def _supplement_status(self, team, message_id):
+        by_session = {m['session_id']: m['member_id'] for m in team['members']}
+        rows = self.db.execute("""SELECT i.session_id, i.status, t.status AS turn_status,
+                    d.status AS delivery_status FROM supplement_inputs i
+                    LEFT JOIN turns t ON t.id=i.turn_id JOIN message_deliveries d
+                    ON d.message_id=i.message_id AND d.session_id=i.session_id AND d.purpose='message'
+                    WHERE i.message_id=?""", (message_id,))
+        result = []
+        for row in rows:
+            status = row['status']
+            if status != 'applied' and row['delivery_status'] == 'cancelled':
+                status = 'cancelled'
+            elif status == 'queued' and (row['turn_status'] not in {'running', 'recoverable'}
+                                         or row['delivery_status'] != 'pending'):
+                status = 'fallback'
+            if row['session_id'] in by_session:
+                result.append({'member_id': by_session[row['session_id']], 'status': status})
+        return result
+
     def snapshot(self, team_id, actor):
         parameters = {"team": team_id, "actor": actor.id}
         with self.db:
@@ -658,6 +707,11 @@ class CollaborationService:
             messages = [_message(row) for row in self.db.execute(f"""
                 SELECT m.* FROM team_messages m WHERE m.team_id = :team AND {READABLE_MESSAGE} ORDER BY m.seq
             """, parameters)]
+            for message in messages:
+                if message['kind'] == 'supplement':
+                    active_input = self._supplement_status(team, message['id'])
+                    if active_input:
+                        message['active_input'] = active_input
             goals = [dict(row) for row in self.db.execute(f"""
                 SELECT g.* FROM team_goals g JOIN team_messages m ON m.id = g.source_message_id
                 WHERE g.team_id = :team AND {READABLE_MESSAGE} ORDER BY g.seq
@@ -709,6 +763,10 @@ class CollaborationService:
                         ("question_id", "asker_id", "source_message_id", "answer_message_id")}
             if goal_id is None:
                 data = {"seq": seq, "message": _message(fields)}
+                if fields['kind'] == 'supplement':
+                    active_input = self._supplement_status(self.team(team_id, actor), fields['id'])
+                    if active_input:
+                        data['message']['active_input'] = active_input
                 if question["question_id"] is not None:
                     if question["question_id"] == fields["id"]:
                         question["answer_message_id"] = None
@@ -719,6 +777,14 @@ class CollaborationService:
                 if self.goal_lifecycle is not None:
                     goal.update(self.goal_lifecycle.enrich_goal(team_id, actor, goal))
                 data = {"seq": seq, "goal": goal}
+                if event_type in {'goal.completed', 'goal.failed', 'goal.cancelled', 'goal.timed_out'}:
+                    team = self.team(team_id, actor)
+                    affected = self.db.execute(f"""SELECT m.id FROM team_messages m
+                        WHERE m.team_id=:team AND m.reply_to=:source AND m.kind='supplement' AND {READABLE_MESSAGE}
+                        AND EXISTS (SELECT 1 FROM supplement_inputs i WHERE i.message_id=m.id)""",
+                        {'team': team_id, 'source': fields['id'], 'actor': actor.id}).fetchall()
+                    data['supplement_statuses'] = [{'id': r['id'], 'active_input': self._supplement_status(team, r['id'])}
+                                                   for r in affected]
             visible.append((event_type, seq, data))
         scanned_through = rows[-1]["event_seq"] if rows else after
         return visible, scanned_through, len(rows) == EVENT_BATCH_SIZE

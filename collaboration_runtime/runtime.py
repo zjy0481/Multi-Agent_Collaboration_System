@@ -217,6 +217,10 @@ class Runtime:
             self.db.execute("UPDATE assistant_jobs SET status = ? WHERE turn_id = ? AND status = 'running'",
                             (status, turn_id))
         self._event(turn_id, f"turn.{status}", reply=reply, error=error)
+        if self.collaboration is not None and status != "recoverable":
+            for row in self.db.execute("""SELECT i.message_id, m.team_id FROM supplement_inputs i
+                    JOIN team_messages m ON m.id=i.message_id WHERE i.turn_id=? AND i.status='queued'""", (turn_id,)):
+                self.collaboration._event(row['team_id'], 'supplement.status', row['message_id'])
 
     def _finish(self, turn_id: str, status: str, **fields):
         with self.db:
@@ -266,6 +270,47 @@ class Runtime:
         with self.db:
             self.journal.queue_input(turn_id, text)
             self._event(turn_id, "turn.input_queued", text=text)
+
+    def queue_supplement(self, role, goal_id, receipt, text):
+        """Queue in the caller's transaction; retain the delivery until applied."""
+        turn = self.active.get(role)
+        if self.closing or turn is None:
+            return False
+        row = self.db.execute("""
+            SELECT t.status, d.message_id, d.purpose, d.status AS delivery_status, m.kind FROM turns t
+            JOIN scheduled_turns st ON st.turn_id=t.id
+            JOIN message_deliveries d ON d.event_id=st.event_id AND d.session_id=st.session_id AND d.purpose=st.purpose
+            JOIN team_messages m ON m.id=d.message_id
+            WHERE t.id=? AND t.role=?
+        """, (turn.id, role)).fetchone()
+        if not row or row['status'] != 'running' or row['delivery_status'] != 'running':
+            return False
+        member = self.db.execute("SELECT team_id FROM members WHERE session_id=?", (role,)).fetchone()
+        if not member or self.collaboration.goal_for_message(member['team_id'], row['message_id']) != goal_id:
+            return False
+        purpose = row['purpose']
+        if purpose == 'message':
+            if row['kind'] != 'assignment':
+                return False
+        elif purpose in (*OWNER_DELIVERIES, 'task.submitted'):
+            actor = self.collaboration.auth.member(role)
+            try:
+                eligible = actor is not None and self._priority_applies(actor, row)
+            except TeamNotFound:
+                eligible = False
+            if not eligible:
+                return False
+        else:
+            return False
+        checkpoint = self.journal.checkpoint(turn.id)
+        if not checkpoint or checkpoint['generation'] != turn.generation or checkpoint['phase'] == GOAL_CONFIRMATION_PHASE or len(checkpoint['pending']) >= 16:
+            return False
+        entry = {'text': text, 'message_id': receipt['message_id'], 'event_id': receipt['event_id'],
+                 'session_id': role, 'team_id': member['team_id']}
+        self.journal.queue_input(turn.id, entry)
+        self.db.execute("INSERT INTO supplement_inputs VALUES (?, ?, ?, 'queued')", (receipt['message_id'], role, turn.id))
+        self._event(turn.id, 'turn.input_queued', **entry)
+        return True
 
     def get_turn(self, role: str, turn_id: str) -> dict | None:
         row = self.db.execute(
@@ -585,8 +630,18 @@ class Runtime:
                 with self.db:
                     if can_yield and member is not None and self._yield_to_pending_delivery(turn, member, goal_id):
                         return
-                    for new_text in self.journal.drain_inputs(turn.id, turn.generation):
-                        self._event(turn.id, "turn.input_applied", text=new_text)
+                    for new_input in self.journal.drain_inputs(turn.id, turn.generation):
+                        if isinstance(new_input, dict):
+                            new_text = new_input['text']
+                            claimed = self.db.execute("UPDATE message_deliveries SET status='completed' WHERE event_id=? AND session_id=? AND purpose='message' AND status='pending'", (new_input['event_id'], new_input['session_id']))
+                            if claimed.rowcount != 1:
+                                continue
+                            self.db.execute("UPDATE supplement_inputs SET status='applied' WHERE message_id=? AND session_id=?", (new_input['message_id'], new_input['session_id']))
+                            self._event(turn.id, "turn.input_applied", **new_input)
+                            self.collaboration._event(new_input['team_id'], 'supplement.status', new_input['message_id'])
+                        else:
+                            new_text = new_input
+                            self._event(turn.id, "turn.input_applied", text=new_text)
                         current.append({"role": "user", "content": new_text})
                     self._advance(turn, step, phase, current)
                     self._event(turn.id, "model.started", step=step + 1, generation=turn.generation, **model_identity)
@@ -704,8 +759,10 @@ class Runtime:
             raise UnknownToolOutcome(f"Check the outcome of {name} ({call_id}) before retrying this work")
 
         pending = self.journal.checkpoint(turn.id)["pending"]
+        # Group supplements enter at the next model boundary. Direct steering can discard an unstarted tool.
+        direct_steer = any(isinstance(entry, str) for entry in pending)
         skip_reason = ("Work is waiting for human input." if pause else
-                       "Input changed. Decide again before using this tool." if pending and receipt is None else None)
+                       "Input changed. Decide again before using this tool." if direct_steer and receipt is None else None)
         if workspace_id is not None:
             self.workspace_tools.actor(role)
         with self.db:

@@ -233,6 +233,27 @@ function connect(cursor, generation) {
         notice("无法读取实时事件，请刷新工作台");
       }
     });
+  for (const type of ["goal.completed", "goal.failed", "goal.cancelled", "goal.timed_out"]) {
+    stream.addEventListener(type, (event) => {
+      if (generation !== state.generation) return;
+      try {
+        const data = JSON.parse(event.data);
+        for (const status of data.supplement_statuses || []) {
+          const existing = state.messages.find(m => m.id === status.id);
+          if (existing) existing.active_input = status.active_input;
+        }
+        render();
+      } catch (_) { notice("无法更新补充状态，请刷新工作台"); }
+    });
+  }
+  stream.addEventListener("supplement.status", (event) => {
+    if (generation !== state.generation) return;
+    try {
+      const incoming = JSON.parse(event.data).message;
+      const existing = state.messages.find(m => m.id === incoming.id);
+      if (existing) { existing.active_input = incoming.active_input; render(); }
+    } catch (_) { notice("无法更新补充状态，请刷新工作台"); }
+  });
   stream.addEventListener("stream.reset", () => {
     if (generation === state.generation) loadTeam(state.team, true);
   });
@@ -467,6 +488,9 @@ function render() {
     ["assignment", "supplement"].includes($("kind").value)
   )
     $("kind").value = "chat";
+  const canSteer = state.actor === "local-operator" && !state.peer && $("kind").value === "supplement" && state.messages.some(m => m.id === state.reply && m.kind === "assignment");
+  $("steer-active").disabled = !canSteer;
+  if (!canSteer) $("steer-active").checked = false;
   $("conversation-title").textContent = state.peer
     ? `与 ${nameOf(state.peer)} 的私聊`
     : "群聊";
@@ -513,6 +537,7 @@ function render() {
         element("div", `点名：${m.mentions.map(nameOf).join("、")}`, "quote"),
       );
     item.append(element("p", m.text));
+    if (m.active_input?.length) item.append(element("div", m.active_input.map(x => `${nameOf(x.member_id)}：${x.status === "applied" ? "已应用" : x.status === "fallback" ? "转普通投递" : x.status === "cancelled" ? "已取消" : "已排队"}`).join("、"), "quote"));
     const question = state.questions.find((q) => q.question_id === m.id);
     if (m.kind !== "question" || (state.actor === "local-operator" && question && !question.answer_message_id)) {
       const reply = element("button", m.kind === "question" ? "答复" : "引用");
@@ -667,6 +692,7 @@ $("composer").onsubmit = async (e) => {
   const body = {
     text,
     kind: $("kind").value,
+    ...($("steer-active").checked ? { steer_active: true } : {}),
     mentions: [...$("mentions").selectedOptions].map((o) => o.value),
     ...(state.peer ? { recipient_id: state.peer } : {}),
     ...(state.reply ? { reply_to: state.reply } : {}),
@@ -678,7 +704,7 @@ $("composer").onsubmit = async (e) => {
   const generation = state.generation;
   $("send").disabled = true;
   try {
-    await api(`/v1/teams/${encodeURIComponent(team)}/messages`, {
+    const sent = await api(`/v1/teams/${encodeURIComponent(team)}/messages`, {
       method: "POST",
       body: JSON.stringify({ ...body, request_id: state.pending.request_id }),
     });
@@ -687,7 +713,13 @@ $("composer").onsubmit = async (e) => {
       state.reply = null;
       state.pending = null;
       renderReply();
-      notice("");
+      if (sent.active_input?.length) {
+        const existing = state.messages.find(m => m.id === sent.message_id);
+        if (existing) existing.active_input = sent.active_input;
+        $("steer-active").checked = false;
+        render();
+      }
+      notice(sent.active_input?.map(x => `${nameOf(x.member_id)}：${x.status === "queued" ? "已排队" : "普通投递"}`).join("、") || "");
     }
   } catch (err) {
     notice(`${err.message}；可再次发送以重试`);
@@ -696,4 +728,5 @@ $("composer").onsubmit = async (e) => {
       $("send").disabled = false;
   }
 };
+$("kind").addEventListener("change", render);
 loadTeams().catch((e) => notice(e.message));

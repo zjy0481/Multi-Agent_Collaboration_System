@@ -189,6 +189,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             collaboration.delegation_tools = DelegationTools(delegation, auth, workspace)
             runtime.workspace_tools = workspace
             runtime.collaboration = collaboration
+            collaboration.runtime = runtime
             forks = ForkService(runtime, collaboration, workspace, delegation)
             runtime.forks = forks
             runtime.fork_messages = ForkMessages(forks, collaboration, runtime)
