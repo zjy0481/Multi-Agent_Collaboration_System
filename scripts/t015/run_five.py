@@ -36,6 +36,21 @@ SCENARIOS = {"software": "scenario_1*", "newsroom": "scenario_2*", "fund": "scen
 END_STATES = {"completed", "failed", "cancelled", "timed_out"}
 TASK_DELIVERIES = {"task.assigned", "task.updated", "task.ready", "task.returned", "task.submitted", "clarification.resume", "clarification.correction"}
 RECOVERABLE_ERRORS = {"Turn exceeded its model step limit", "Course API request timed out"}
+
+
+def sequential_plan():
+    return [('software', (1, 2)), ('fund', (1,)), ('newsroom', (1,))]
+
+
+def run_sequential(run_scenario):
+    outcomes = {}
+    for name, phases in sequential_plan():
+        outcomes[name] = run_scenario(name, phases)
+        if outcomes[name] != 'finished':
+            break
+    return outcomes
+
+
 TABLES = ("team_messages", "team_goals", "goal_terminal_facts", "human_questions",
           "message_deliveries", "turns", "scheduled_turns", "execution_receipts", "events",
           "artifact_versions", "delegation_tasks", "delegation_revisions", "delegation_proposals",
@@ -99,7 +114,8 @@ class Scenario:
         self.sample = next((ROOT / "test samples").glob(SCENARIOS[name]))
         self.state = directory / "state"
         self.fixture = None
-        self.fresh_software = args.fresh_software and name == "software"
+        self.sequential = getattr(args, "sequential_four", False)
+        self.fresh_software = (args.fresh_software or self.sequential) and name == "software"
         self.t1_handoff = None
         if name == "software" and not self.fresh_software:
             self.fixture = prepare_software_state(args.software_baseline, self.state, directory / "fixture")
@@ -222,16 +238,16 @@ class Scenario:
                 if len(required_inputs) != 2:
                     raise RuntimeError('Software dev and qa members are required for the handoff')
         extra = {'required_inputs': required_inputs} if required_inputs else {}
-        if self.fresh_software:
+        if self.fresh_software or (self.sequential and number == 1):
             minutes = [round(self.stage_seconds * f / 60, 2) for f in (.15, .4, .6, .8, 1)]
-            guidance = (f"Time budget: {self.stage_seconds} seconds. Minute {minutes[0]}: register development; "
-                        f"{minutes[1]}: publish a runnable candidate with launch instructions and a smoke result; "
+            guidance = (f"Time budget: {self.stage_seconds} seconds. Minute {minutes[0]}: register the primary task; "
+                        f"{minutes[1]}: publish a reviewable candidate and the result of one representative check; "
                         f"{minutes[2]}: first review; {minutes[3]}: any rework; {minutes[4]}: close if accepted. "
-                        "Developer builds; QA prepares checks and reviews the shared version; Release prepares "
-                        "instructions. Publish and submit the first checkable outcome before optional refinements. ")
-            if number == 1:
+                        "Assign production and review early. Share the same candidate with the reviewer. "
+                        "Publish and submit the first checkable outcome before optional refinements. ")
+            if self.fresh_software and number == 1:
                 guidance += (
-                    "Publish the runnable candidate as t1-app.zip for Lead, Developer, QA and Release. "
+                    "Publish the runnable candidate as t1-app.zip with launch instructions for Lead, Developer, QA and Release. "
                     "Use a persistent workspace SQLite database from the first demonstration. Make several real calls "
                     "to the running app, including a successful reservation and cancellation. Before final review "
                     "use sqlite3.Connection.backup and publish t1-bookings.sqlite3 and t1-data-provenance.json. "
@@ -241,7 +257,7 @@ class Scenario:
                     "(table, room, date, start, end, status, active_values, cancelled_values). Include approved app "
                     "and snapshot versions in the final evidence."
                 )
-            else:
+            elif self.fresh_software:
                 handoff = self.t1_handoff or {}
                 guidance += (
                     f"T1 application: {handoff.get('app_version_id') or 'unavailable'}. "
@@ -282,7 +298,7 @@ class Scenario:
         resume_counts = {}
         reminders = 0
         outcome = None
-        milestone_fractions = iter((.15, .4, .6, .8, 1.0)) if self.fresh_software else iter(())
+        milestone_fractions = iter((.15, .4, .6, .8, 1.0)) if (self.fresh_software or self.sequential) else iter(())
         next_milestone = next(milestone_fractions, None)
         delivery_seconds = None
         while True:
@@ -327,7 +343,7 @@ class Scenario:
                 break
             if current_time >= deadline:
                 active_delivery = any(turn['purpose'] in TASK_DELIVERIES for turn in status['active'])
-                if not grace_used and (active_delivery or current_time-material_change <= 45):
+                if self.grace_seconds > 0 and not grace_used and (active_delivery or current_time-material_change <= 45):
                     deadline += self.grace_seconds
                     grace_used = True
                     self.log('grace_window', phase=number, seconds=self.grace_seconds,
@@ -390,7 +406,7 @@ class Scenario:
                  reminders=reminders, human_answers=len(answered), resume_attempts=len(attempted_resumes), grace=grace_used)
         return outcome
 
-    def run(self):
+    def run(self, phases=None):
         with TestClient(self.app, raise_server_exceptions=False) as client:
             if self.fixture:
                 response = client.get(f"/v1/teams/{self.fixture['team_id']}", headers={"Authorization": f"Bearer {self.token}"})
@@ -415,7 +431,7 @@ class Scenario:
                 write_json(self.directory / 'handoff-fixture.json', self.fixture)
             self.dump(client, 'initial')
             try:
-                for phase in ((2,) if self.fixture else (1, 2)):
+                for phase in (phases if phases is not None else ((2,) if self.fixture else (1, 2))):
                     if getattr(self.model, "paused_reason", None):
                         self.log("provider_paused_before_phase", phase=phase, team_id=self.team["team_id"],
                                  reason=self.model.paused_reason)
@@ -447,9 +463,14 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--software-baseline', type=Path, help='Original completed software T1 scenario directory')
     group.add_argument('--fresh-software', action='store_true', help='Run only software T1 and T2 in one fresh team')
+    group.add_argument('--sequential-four', action='store_true', help='Fresh software T1/T2, fund T1, newsroom T1 in order')
     args = parser.parse_args()
     if args.grace_seconds is None:
-        args.grace_seconds = 0 if args.fresh_software else 75
+        args.grace_seconds = 0 if (args.fresh_software or args.sequential_four) else 75
+    if args.sequential_four:
+        if args.jobs != 1 or args.stage_seconds != 1200 or args.grace_seconds != 0:
+            parser.error('--sequential-four requires --jobs 1, --stage-seconds 1200 and --grace-seconds 0')
+        args.scenarios = [name for name, _ in sequential_plan()]
     if args.fresh_software:
         args.scenarios = ["software"]
         if args.jobs != 1:
@@ -479,18 +500,22 @@ def main():
     write_json(parent / "run.json", {"revision": revision, "scenarios": args.scenarios, "started_at": now(),
                                      "stage_seconds": args.stage_seconds, "grace_seconds": args.grace_seconds,
                                      "idle_seconds": args.idle_seconds,
-                                     "jobs": args.jobs, "fresh_software": args.fresh_software, "runtime_source_sha256": runtime_sources})
+                                     "jobs": args.jobs, "fresh_software": args.fresh_software, "sequential_four": args.sequential_four,
+                                     "phase_plan": sequential_plan() if args.sequential_four else None, "runtime_source_sha256": runtime_sources})
 
-    def run_scenario(scenario):
+    def run_scenario(scenario, phases=None):
         try:
-            return Scenario(scenario, parent / scenario, args).run()
+            return Scenario(scenario, parent / scenario, args).run(phases)
         except Exception as exc:
             print(json.dumps({"scenario": scenario, "event": "runner_error", "error": str(exc)}, ensure_ascii=True), flush=True)
             return "error"
 
-    with ThreadPoolExecutor(max_workers=args.jobs) as executor:
-        futures = {executor.submit(run_scenario, scenario): scenario for scenario in args.scenarios}
-        outcomes = {futures[future]: future.result() for future in as_completed(futures)}
+    if args.sequential_four:
+        outcomes = run_sequential(run_scenario)
+    else:
+        with ThreadPoolExecutor(max_workers=args.jobs) as executor:
+            futures = {executor.submit(run_scenario, scenario): scenario for scenario in args.scenarios}
+            outcomes = {futures[future]: future.result() for future in as_completed(futures)}
     write_json(parent / "runner-result.json", {"scenarios": outcomes,
                "blocked": any(value == "provider_paused" for value in outcomes.values())})
     if any(value != "finished" for value in outcomes.values()):

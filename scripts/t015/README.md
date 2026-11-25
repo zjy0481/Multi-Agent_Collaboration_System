@@ -27,3 +27,13 @@ python scripts/t015/run_five.py --run fresh-software-unique-name --fresh-softwar
 ```
 
 The protected assignment guidance requests one developer-to-QA build, a persistent SQLite demonstration, and milestones at 3, 8, 12, 16 and 20 minutes for a 20-minute stage. It requests `t1-app.zip`, `t1-bookings.sqlite3`, and `t1-data-provenance.json`, followed by `t2-dashboard-check.json`. The runner records milestone events and audits the T1 handoff before T2. If both structurally valid versions are readable by developer and QA, their fixed IDs are required inputs for both roles; candidate versions are explicitly identified as candidates when unapproved. Missing data is never synthesized. Audits and trace files are under `.tmp/t015/<run>/software/`; `strict_ready` and the T2 audit are evidence checks, not a substitute for independent application and browser acceptance. `runner-result.json` alone does not establish task success. The team event records the actual loaded model identity. Docker and a configured real provider remain prerequisites; this command makes live model calls.
+
+## Sequential four-task run
+
+`--sequential-four` creates a fresh software team for T1 and T2, then fresh fund and newsroom teams for their T1 only, in that order. Every stage has a 1,200-second deadline with no grace; this mode rejects other stage, grace or concurrency values. It retains software snapshot auditing and applies protected milestone guidance at minutes 3, 8, 12, 16 and 20 to all stages. Each scenario records assignment IDs, milestone and terminal events, trace and reports; `run.json` records the phase plan. A provider pause or runner error stops subsequent scenarios. No historical database is injected.
+
+```powershell
+python scripts/t015/run_five.py --run sequential-four-unique-name --sequential-four --jobs 1 --stage-seconds 1200 --grace-seconds 0
+```
+
+This is a live model run and requires the configured provider and Docker sandbox image.
