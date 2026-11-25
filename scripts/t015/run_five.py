@@ -252,9 +252,10 @@ class Scenario:
                     "to the running app, including a successful reservation and cancellation. Before final review "
                     "use sqlite3.Connection.backup and publish t1-bookings.sqlite3 and t1-data-provenance.json. "
                     "Print T015_SNAPSHOT_SHA256=<snapshot hash> in the successful backup command. The provenance "
-                    "JSON includes app_version_id, app_sha256, database_sha256, relative source_database_path, "
-                    "backup_method (sqlite3.Connection.backup), operations (method and HTTP status), and schema "
-                    "(table, room, date, start, end, status, active_values, cancelled_values). Include approved app "
+                    "JSON includes app_version_id, app_sha256, database_sha256, source_database_path "
+                    "(workspace-relative path), backup_method (sqlite3.Connection.backup), operations "
+                    "(each with method and integer status), and schema (table, room, date, start, end, status "
+                    "as exact existing table/column names, plus active_values and cancelled_values arrays). Include approved app "
                     "and snapshot versions in the final evidence."
                 )
             elif self.fresh_software:
@@ -265,9 +266,11 @@ class Scenario:
                     f"T1 formal handoff evidence ready: {bool(handoff.get('strict_ready'))}. "
                     "Use any available fixed versions read-only and report what is missing or unapproved. "
                     "Extend that build and validate the actual dashboard against the same snapshot. "
-                    "Publish t2-dashboard-check.json with database_version_id, range_start, range_end and "
-                    "observed metrics: total_count, total_minutes, cancelled_count, rooms (count, minutes, "
-                    "cancelled_count), busiest_dates and busiest_periods. Count valid active bookings in usage "
+                    "Publish t2-dashboard-check.json with database_version_id, range_start, range_end and a metrics "
+                    "object containing total_count, total_minutes, cancelled_count, rooms, busiest_dates and busiest_periods. "
+                    "Use string room IDs as keys in rooms and include count, minutes, cancelled_count for each room. "
+                    "Use arrays of strings for busiest_dates and busiest_periods. "
+                    "Count valid active bookings in usage "
                     "and cancellations separately. Use inclusive YYYY-MM-DD dates and HH:MM hours with ties."
                 )
             extra['assignment_guidance'] = guidance
