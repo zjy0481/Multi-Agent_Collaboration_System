@@ -120,3 +120,28 @@ def test_waiting_dependency_blocks_formal_submission(tmp_path):
         corrected = publish(client, base, qa, [lead], b"confirmed against approved source", draft["artifact_id"])
         replacement = ok(submit(client, down_url, tokens[qid], submission(corrected)))
         ok(review(client, down_url, tokens[lid], replacement["submission_id"], decision()))
+
+
+def test_grant_requires_exact_path_and_gives_safe_correction(tmp_path):
+    from functools import partial
+    with TestClient(app(tmp_path)) as client:
+        base, lead, others, tokens, goal = context(client)
+        dev, qa, release = others[:3]
+        lid, did, qid, rid = (x["member_id"] for x in (lead, dev, qa, release))
+        up = register(client, base, lid, tokens, goal, terms(did, qid, output_grants={rid: ["result.txt"]}))
+        down = register(client, base, lid, tokens, goal, terms(rid, lid, dependency_ids=[up]))
+        item = client.portal.call(partial(client.app.state.workspace.artifacts.publish,
+            team_id=base.rsplit("/", 1)[-1], author_session_id=dev["session_id"],
+            source_path="dist/result.txt", content=b"output", reader_session_ids=[qa["session_id"], release["session_id"]]))
+        sent = ok(submit(client, f"{base}/tasks/{up}", tokens[did], submission(item)))
+        ok(review(client, f"{base}/tasks/{up}", tokens[qid], sent["submission_id"], decision()))
+        view = ok(client.get(f"{base}/tasks/{down}", headers=auth(tokens[rid])))
+        assert view["dependency_blockers"][up] == "publisher_action_required"
+        assert "exact output_grants paths" in view["dependency_guidance"][up]
+        assert "dist/result.txt" not in str(view) and item["version_id"] not in str(view)
+        register(client, base, lid, tokens, goal, terms(did, qid, output_grants={rid: ["dist/result.txt"]}),
+                 task_id=up, base_revision=1)
+        sent = ok(submit(client, f"{base}/tasks/{up}", tokens[did], submission(item, 2)))
+        ok(review(client, f"{base}/tasks/{up}", tokens[qid], sent["submission_id"], decision(revision=2)))
+        ready = ok(client.get(f"{base}/tasks/{down}", headers=auth(tokens[rid])))
+        assert ready["status"] == "ready" and ready["dependency_outputs"][up] == [item["version_id"]]
