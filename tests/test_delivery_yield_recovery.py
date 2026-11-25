@@ -104,3 +104,75 @@ def test_new_priority_traffic_does_not_starve_yielded_chat(tmp_path):
         client.portal.call(complete, priority[1])
         resumed = client.portal.call(scheduler._claim_one)
         assert resumed[1] == ordinary[1]
+
+
+def test_displaced_formal_delivery_has_one_bounded_safe_continuation(tmp_path):
+    import json
+    from test_collaboration import send
+    from test_delivery_priority import run_one
+    from test_delegation import context
+    from test_scheduler import tool
+    from test_workspace import MemorySandbox
+
+    class Model:
+        count = 0
+
+        async def complete(self, messages, tools):
+            self.count += 1
+            if self.count == 1:
+                return tool("publish_artifact", "publish-once", {"path": "result.txt", "reader_session_ids": []})
+            return tool("list_artifacts", f"list-{self.count}", {})
+
+    with TestClient(app(tmp_path)) as client:
+        base, lead, _, _, goal_id = context(client)
+        state = client.app.state
+        queue = DeliveryScheduler(state.runtime, state.collaboration, state.workspace)
+        queue.runtime.max_steps = 1
+        queue.runtime.model = Model()
+        workspace = state.workspace
+        workspace.sandbox = MemorySandbox()
+        workspace.sandbox.prepare(client.portal.call(workspace.actor, lead["session_id"]).workspace_id)
+        assert client.portal.call(workspace.execute, lead["session_id"], "create_file",
+                                  json.dumps({"path": "result.txt", "content": "once"}))["ok"]
+        target = client.portal.call(queue._claim_one)
+        ordinary = send(client, base, OPERATOR, request_id="older-work", text="Earlier ordinary work",
+                        goal_id=goal_id)
+
+        def displace():
+            db = queue.db
+            with db:
+                from uuid import uuid4
+                old_id = uuid4().hex
+                db.execute("INSERT INTO turns(id,role,status) VALUES (?,?,'yielded')", (old_id, lead["session_id"]))
+                queue.runtime.journal.create(old_id, [{"role": "user", "content": "earlier"}])
+                db.execute("INSERT INTO scheduled_turns(turn_id,event_id,session_id,purpose) VALUES (?,?,?,?)",
+                           (old_id, ordinary["event_id"], lead["session_id"], "message"))
+                db.execute("UPDATE message_deliveries SET status='running' WHERE event_id=? AND session_id=?",
+                           (ordinary["event_id"], lead["session_id"]))
+                db.execute("UPDATE turns SET status='yielded' WHERE id=?", (old_id,))
+                event = db.execute("SELECT event_id FROM scheduled_turns WHERE turn_id=?", (target[1],)).fetchone()[0]
+                queue.runtime._event(old_id, "turn.delivery_yielded", event_id=event, queued_through=event)
+            return old_id
+
+        old_id = client.portal.call(displace)
+
+        async def launch_target():
+            queue.runtime.launch(*target)
+            await queue.runtime.active[target[0]].task
+
+        client.portal.call(launch_target)
+        assert client.portal.call(run_one, queue) == target[1]
+        assert client.portal.call(run_one, queue) == target[1]
+
+        def inspect():
+            db = queue.db
+            return (db.execute("SELECT status FROM turns WHERE id=?", (target[1],)).fetchone()[0],
+                    db.execute("SELECT count(*) FROM artifact_versions").fetchone()[0],
+                    [json.loads(x[0])["source"] for x in db.execute(
+                        "SELECT payload FROM events WHERE turn_id=? AND type='model.retry_requested' ORDER BY seq",
+                        (target[1],))], queue._claim_one()[1])
+
+        status, versions, sources, next_turn = client.portal.call(inspect)
+        assert (status, versions) == ("failed", 1)
+        assert sources == ["automatic", "automatic_displaced"]
+        assert next_turn == old_id

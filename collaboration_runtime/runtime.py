@@ -97,16 +97,20 @@ DELIVERY_PROMPT = (
     "On a new user assignment the Lead should register_goal with that message ID before delegating. "
     "Agree on the smallest complete deliverable and shared acceptance checks. Start independent work "
     "in parallel when the inputs allow it; state exact input versions, output names, and who reviews. "
+    "Assign draft checks against a pinned published version. Reserve dependencies for approved outputs. "
+    "Put output grants on the producing task. "
     "Confirm a proposal only when its current terms are clear. The proposer registers the task once "
     "all required parties have confirmed. Do proposal decisions in the proposal delivery and start the work "
     "in the assigned or ready delivery. Avoid echoing confirmations or status messages. "
     "On a task you own, once one representative acceptance check passes for a reviewable candidate, "
     "publish the exact result and evidence to the required readers and call submit_result before optional checks. "
-    "For research, run a few focused searches, then read relevant primary sources and start the draft. "
+    "For research, run a few focused searches, then draft from the primary evidence already read. "
+    "Search again only for a named gap that changes a claim or an acceptance check. "
     "Use durable source IDs or cite the actual source and passage you read. Search titles and snippets alone "
     "are leads. Mark claims awaiting evidence, and change approach or report a blocker if further searches "
     "produce no useful evidence or the provider reports degradation. "
-    "When review_request is present, complete the review_result action using evidence for each criterion. "
+    "When review_request is present, use the exact submitted versions. Give a review_result decision "
+    "as soon as you can evaluate the criteria. Return specific gaps and recheck items promptly. "
     "The Lead records the required task deliveries in the goal acceptance and uses close_goal with the "
     "accepted versions when the goal is complete. For earlier assignments, use explicitly shared "
     "artifacts or recorded experience. A final reply stays in this session. Use send_message for "
@@ -423,15 +427,24 @@ class Runtime:
         current = delegation._visible_task(actor.team_id, actor, task["id"])
         return current["revision"] == task["revision"] and delegation.results.status(current) in READY_TO_SUBMIT
 
-    def _publication_followup(self, actor, delivery_task, result):
-        if actor is None or not delivery_task or not result.get("ok") or delivery_task["terms"]["owner_id"] != actor.id:
+    def _publication_followup(self, turn_id, actor, delivery_task, assignment_goal, result):
+        if actor is None or not result.get("ok") or not (delivery_task or assignment_goal):
             return result
         delegation = self.collaboration.delegation
         try:
-            task = delegation._visible_task(actor.team_id, actor, delivery_task["id"])
+            if delivery_task:
+                task = delegation._visible_task(actor.team_id, actor, delivery_task["id"])
+                if task["revision"] != delivery_task["revision"]:
+                    return result
+            else:
+                overview = delegation.compact_snapshot(actor.team_id, actor, goal_id=assignment_goal)
+                owned = [item for item in overview["tasks"] if item["owner_id"] == actor.id]
+                if overview["truncated"]["tasks"] or len(owned) != 1:
+                    return result
+                task = delegation._visible_task(actor.team_id, actor, owned[0]["id"])
         except TeamNotFound:
             return result
-        if (task["revision"] != delivery_task["revision"] or task["terms"]["owner_id"] != actor.id
+        if (task["terms"]["owner_id"] != actor.id
                 or not self.collaboration.goal_lifecycle.scope_is_open(task["goal_id"])
                 or delegation.results.status(task) not in READY_TO_SUBMIT):
             return result
@@ -440,11 +453,38 @@ class Runtime:
         version = result["result"]
         if reviewer["session_id"] not in version["reader_session_ids"]:
             return result
+
+        # Offer this turn's reviewer-readable publications. The owner selects the complete bundle.
+        versions = []
+        paths = set()
+        artifacts = set()
+        rows = self.db.execute("""
+            SELECT result FROM execution_receipts WHERE turn_id = ? AND name = 'publish_artifact' AND state = 'completed'
+            ORDER BY step DESC, position DESC LIMIT 24
+        """, (turn_id,)).fetchall()
+        for row in rows:
+            receipt = json.loads(row["result"])
+            if not receipt.get("ok"):
+                continue
+            item = receipt["result"]
+            if (item["author_session_id"] != actor.session_id
+                    or reviewer["session_id"] not in item["reader_session_ids"]
+                    or item["source_path"] in paths or item["artifact_id"] in artifacts):
+                continue
+            paths.add(item["source_path"])
+            artifacts.add(item["artifact_id"])
+            versions.append({"path": item["source_path"], "version_id": item["version_id"]})
+
         return {**result, "next_action": {
             "tool": "submit_result", "task_id": task["id"], "expected_revision": task["revision"],
             "version_id": version["version_id"],
-            "guidance": "When the candidate passes its representative check, submit the required version IDs and evidence. "
-                        "Record open issues and leave the acceptance decision to the designated reviewer.",
+            "arguments": {"task_id": task["id"], "expected_revision": task["revision"],
+                          "version_ids": [item["version_id"] for item in versions]},
+            "published_versions": versions,
+            "required_fields": ["request_id", "evidence"],
+            "guidance": "If the required files are ready and the representative check passed, call submit_result now. "
+                        "Use only the relevant version_ids. Add a request_id and one or more actual check results "
+                        "as evidence. Include remaining gaps in open_issues.",
         }}
 
     def _check_assistant_job(self, role, turn_id):
@@ -552,7 +592,8 @@ class Runtime:
                             await self._confirm_goal_close(role, turn)
                             return
                         if name == "publish_artifact":
-                            result = self._publication_followup(member, delivery_task, result)
+                            assignment_goal = goal_id if scheduled and message["kind"] == "assignment" else None
+                            result = self._publication_followup(turn.id, member, delivery_task, assignment_goal, result)
                         current.append({"role": "tool", "tool_call_id": call["id"],
                                         "content": json.dumps(result, ensure_ascii=False)})
                         proposal_confirmed |= _confirmation_yields(proposal, name, result)
@@ -639,22 +680,39 @@ class Runtime:
                         return
             with self.db:
                 if self.journal.current(turn.id, turn.generation):
-                    # Only an active formal delivery may spend the single automatic extension.
                     payload = json.loads(current[0]["content"]) if scheduled else {}
                     purpose = payload.get("delivery", {}).get("purpose", "")
                     critical = (purpose.startswith(("task.", "delegation.", "clarification.")) or
                                 payload.get("message", {}).get("kind") == "assignment")
                     unresolved = self.db.execute("SELECT 1 FROM execution_receipts WHERE turn_id=? AND state='started'",
                                                  (turn.id,)).fetchone()
-                    auto = bool(scheduled and not fork_message_id and critical and goal_id and not extra_steps
-                                and not unresolved and phase == "model" and self.collaboration.goal_lifecycle.scope_is_open(goal_id))
                     if unresolved:
                         self._write_finish(turn.id, "needs_reconciliation", error="Prior tool outcome needs verification")
                         return
+                    can_continue = (scheduled and not fork_message_id and critical and goal_id and phase == "model"
+                                    and self.collaboration.goal_lifecycle.scope_is_open(goal_id))
+                    auto = bool(can_continue and not extra_steps)
+                    # A formal delivery that displaced a same-session ordinary turn gets
+                    # one bounded additional continuation before that older turn resumes.
+                    second_auto = bool(
+                        can_continue and extra_steps == self.max_steps and self.db.execute("""
+                            SELECT 1 FROM scheduled_turns target
+                            JOIN turns older ON older.role = ? AND older.status = 'yielded'
+                            JOIN events e ON e.turn_id = older.id AND e.type = 'turn.delivery_yielded'
+                            WHERE target.turn_id = ? AND json_extract(e.payload, '$.event_id') = target.event_id
+                              AND EXISTS (
+                                  SELECT 1 FROM events retry WHERE retry.turn_id = target.turn_id
+                                  AND retry.type = 'model.retry_requested'
+                                  AND json_extract(retry.payload, '$.source') = 'automatic')
+                            LIMIT 1
+                        """, (role, turn.id)).fetchone()
+                    )
+                    auto = auto or second_auto
                     if auto:
-                        self._event(turn.id, "model.retry_requested", extra_steps=self.max_steps, source="automatic")
+                        self._event(turn.id, "model.retry_requested", extra_steps=self.max_steps,
+                                    source="automatic_displaced" if second_auto else "automatic")
                     automatic = self.db.execute("""SELECT count(*) FROM events WHERE turn_id=? AND type='model.retry_requested'
-                                                AND json_extract(payload,'$.source')='automatic'""", (turn.id,)).fetchone()[0]
+                                                AND json_extract(payload,'$.source') IN ('automatic', 'automatic_displaced')""", (turn.id,)).fetchone()[0]
                     self._event(turn.id, "model.step_limit", generation=turn.generation, step=step, goal_id=goal_id,
                                 task_id=payload.get("task", {}).get("id"), proposal_id=payload.get("proposal", {}).get("id"),
                                 purpose=purpose, automatic_extensions=automatic,

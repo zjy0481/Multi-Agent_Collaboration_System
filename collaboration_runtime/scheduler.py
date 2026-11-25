@@ -28,16 +28,28 @@ def _delivery_guidance(payload, actor_id=None):
         return {'correction': ('Apply the verified change to the referenced work, then yield for the pending task. '
                                'Use the existing candidate and record any effect on its review.')}
     if purpose == 'task.submitted':
-        return {'review': ('Use the task revision and submitted versions in this delivery. Review those versions against '
-                           'the acceptance criteria and traceable evidence. Report a specific gap or decision for each '
-                           'criterion. Read only the needed passages when the evidence locations are known.')}
+        request = payload.get('review_request')
+        if not request:
+            return {'notice': ('This is a submission update. Let the designated reviewer decide. Continue only '
+                               'independent work that needs this update.')}
+        submission = request['submission']
+        return {'review': {
+            'tool': 'review_result',
+            'arguments': {'task_id': submission['task_id'], 'expected_revision': submission['task_revision'],
+                          'submission_id': submission['id']},
+            'guidance': ('Review the exact versions and check each numbered criterion once. Read only the passages '
+                         'needed for the decision. Record one evidence-backed finding per criterion. Approve when all '
+                         'pass. For a return, give the specific gap, expected correction and recheck items. Make this '
+                         'first decision promptly, before optional research or rewriting the candidate.'),
+        }}
     if purpose == 'message' and payload.get('message', {}).get('kind') == 'assignment':
         return {'assignment': ('Register the goal and propose the smallest complete outcome a reviewer can check. '
                                'Clarify blockers and start independent work before expanding the plan. '
                                'Name one primary deliverable, its owner, reviewer and readers. '
-                               'Let that owner publish the primary candidate. Prepare independent checks against '
-                               'the same candidate. If ownership must change, register the change before work shifts. '
-                               'Use output_grants and dependency_ids for work that consumes another task output. '
+                               'Let that owner publish and submit the primary candidate while others prepare checks. '
+                               'Pin exact input_version_ids for checks of a published draft. For work that needs an '
+                               'approved output, use dependency_ids and set output_grants on the producing task. '
+                               'If ownership must change, register the change before work shifts. '
                                'End this turn when waiting for confirmations.')}
     if purpose == 'delegation.proposal':
         if action := payload.get('proposal_action'):
@@ -50,7 +62,9 @@ def _delivery_guidance(payload, actor_id=None):
         task = payload.get('task', {})
         if actor_id is not None and task.get('terms', {}).get('owner_id') == actor_id:
             return {'delivery': ('Choose a representative acceptance check for the smallest reviewable version. '
-                                 'Report missing inputs and continue independent work. When that check passes, '
+                                 'Report a missing input to its dispatcher once and continue independent work. '
+                                 'For research, draft from available evidence and search only for specific gaps. '
+                                 'When the representative check passes, '
                                  'publish the exact result and evidence to the required readers and call submit_result '
                                  'for this task and revision before running optional checks or polishing. '
                                  'Disclose any remaining acceptance gaps and yield to the reviewer.')}

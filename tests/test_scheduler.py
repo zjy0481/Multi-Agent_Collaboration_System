@@ -145,6 +145,7 @@ def test_active_chat_yields_at_tool_boundary_and_formal_owner_gets_submission_hi
         def __init__(self):
             self.order = []
             self.publications = []
+            self.reviewer_inputs = {}
 
         async def complete(self, messages, tools):
             delivery = current_delivery(messages)
@@ -166,9 +167,15 @@ def test_active_chat_yields_at_tool_boundary_and_formal_owner_gets_submission_hi
                     decision = tool("publish_artifact", "private-draft", {"path": "draft.md", "reader_session_ids": []})
                     decision["tool_calls"] += tool("publish_artifact", "review-candidate",
                         {"path": "primary.md", "reader_session_ids": [reviewer["session_id"]]})["tool_calls"]
+                    decision["tool_calls"] += tool("publish_artifact", "review-candidate-current",
+                        {"path": "primary.md", "reader_session_ids": [reviewer["session_id"]]})["tool_calls"]
+                    decision["tool_calls"] += tool("publish_artifact", "review-evidence",
+                        {"path": "check.txt", "reader_session_ids": [reviewer["session_id"]]})["tool_calls"]
                     return decision
-                self.publications = [json.loads(m["content"]) for m in messages[-2:]]
+                self.publications = [json.loads(m["content"]) for m in messages[-4:]]
                 self.order.append("formal receipt")
+            elif delivery["delivery"]["purpose"] == "task.submitted":
+                self.reviewer_inputs[delivery["delivery"]["session_id"]] = delivery["platform_guidance"]
             return {"role": "assistant", "content": "Finished"}
 
     sandbox, model = GateSandbox(), Model()
@@ -194,12 +201,23 @@ def test_active_chat_yields_at_tool_boundary_and_formal_owner_gets_submission_hi
             sandbox.release.set()
         wait_until(lambda: model.order == ["correction", "formal start", "formal receipt", "chat resumed"])
         assert [command for _, command in sandbox.commands] == ["running", "second"]
-        draft, candidate = model.publications
+        draft, older, candidate, evidence = model.publications
         assert draft["ok"] and "next_action" not in draft
         assert candidate["ok"]
         hint = candidate["next_action"]
         assert hint["tool"] == "submit_result" and hint["task_id"] == task
         assert hint["expected_revision"] == 1 and hint["version_id"] == candidate["result"]["version_id"]
+        assert older["result"]["version_id"] != hint["version_id"]
+        assert hint["arguments"]["version_ids"] == [hint["version_id"]]
+        review_bundle = evidence["next_action"]
+        evidence_id = evidence["result"]["version_id"]
+        assert review_bundle["arguments"] == {"task_id": task, "expected_revision": 1,
+                                               "version_ids": [evidence_id, hint["version_id"]]}
+        assert review_bundle["published_versions"] == [
+            {"path": "check.txt", "version_id": evidence_id},
+            {"path": "primary.md", "version_id": hint["version_id"]},
+        ]
+        assert review_bundle["required_fields"] == ["request_id", "evidence"]
         assert ok(client.get(f"{base}/tasks/{task}", headers=auth(tokens[owner_id])))["status"] == "ready"
         db = client.app.state.runtime.db
         saved = client.portal.call(lambda: db.execute("""
@@ -208,6 +226,17 @@ def test_active_chat_yields_at_tool_boundary_and_formal_owner_gets_submission_hi
         """).fetchall())
         assert [row["type"] for row in saved] == ["turn.delivery_yielded", "turn.resumed"]
         assert saved[0]["turn_id"] == saved[1]["turn_id"]
+
+        submitted = ok(client.post(f"{base}/tasks/{task}/submissions", headers=auth(tokens[owner_id]), json={
+            "request_id": key(), "expected_revision": 1, "version_ids": [hint["version_id"], evidence_id],
+            "evidence": ["Representative check passed"],
+        }))
+        wait_until(lambda: {reviewer["session_id"], lead["session_id"]} <= model.reviewer_inputs.keys())
+        review = model.reviewer_inputs[reviewer["session_id"]]["review"]
+        assert review["tool"] == "review_result"
+        assert review["arguments"] == {"task_id": task, "expected_revision": 1,
+                                        "submission_id": submitted["submission_id"]}
+        assert "notice" in model.reviewer_inputs[lead["session_id"]]
 
 
 def test_serial_per_session_parallel_across_sessions_and_tool_receipts(tmp_path):
