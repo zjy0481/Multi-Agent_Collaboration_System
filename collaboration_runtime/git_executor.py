@@ -120,10 +120,22 @@ class GitExecutor:
         if local.is_symlink():
             raise GitActionError('Invalid Git state')
         if not local.exists():
-            result = self._git(['init', '--bare', '--template=' + str(self.template), str(local)])
+            args = ['init', '--bare', '--template=' + str(self.template)]
+            if self.task_branch_repository is not None:
+                args.append('--initial-branch=' + ref.removeprefix('refs/heads/'))
+            result = self._git([*args, str(local)])
             if result.returncode:
                 raise GitActionError('Cannot initialize Git state')
         return local
+
+    def _local_branch_head(self, gitdir, ref):
+        result = self._git([*gitdir, 'rev-parse', '--verify', '--quiet', ref])
+        if result.returncode == 1:
+            return ''
+        sha = result.stdout.decode('ascii', 'replace').strip()
+        if result.returncode or not _SHA.fullmatch(sha):
+            raise GitActionError('Cannot read the local task branch')
+        return sha
 
     def _prepare_parent(self, gitdir, target, ref):
         # Resolve the operator's target branch without checking out any content.
@@ -155,6 +167,7 @@ class GitExecutor:
             raise GitActionError('Invalid file content')
         local = self._local(session_id, repository, ref)
         gitdir = ['--git-dir', str(local)]
+        local_head = self._local_branch_head(gitdir, ref) if self.task_branch_repository is not None else None
         parent = self._prepare_parent(gitdir, target, ref)
         with tempfile.TemporaryDirectory(prefix='index-', dir=self.state_dir) as temp:
             index = Path(temp) / 'index'
@@ -178,8 +191,8 @@ class GitExecutor:
             sha = commit.stdout.decode('ascii', 'replace').strip()
             if commit.returncode or not _SHA.fullmatch(sha):
                 raise GitActionError('Cannot create commit')
-            if self.task_branch_repository is not None:
-                self._update_local_branch(gitdir, ref, sha, parent)
+            if local_head is not None:
+                self._update_local_branch(gitdir, ref, sha, local_head)
             return sha
 
     def _update_local_branch(self, gitdir, ref, sha, previous):

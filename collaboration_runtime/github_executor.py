@@ -131,28 +131,21 @@ class GitHubExecutor(GitExecutor):
     def prepare_branch(self, session_id, repository, ref):
         target = self._target(repository, ref)
         local = self._local(session_id, repository, ref)
-        return self._prepare_parent(["--git-dir", str(local)], target, ref)
+        gitdir = ["--git-dir", str(local)]
+        head = self._local_branch_head(gitdir, ref)
+        if head:
+            return head
+        parent = self._prepare_parent(gitdir, target, ref)
+        if parent:
+            self._update_local_branch(gitdir, ref, parent, None)
+        return parent
 
     def _prepare_parent(self, gitdir, target, ref):
-        if self.task_branch_repository is not None:
-            existing = self._git([*gitdir, "rev-parse", "--verify", "--quiet", ref])
-            if existing.returncode not in (0, 1):
-                raise GitActionError("Cannot read the local task branch")
-            if existing.returncode == 0:
-                head = existing.stdout.decode("ascii", "replace").strip()
-                if not _SHA.fullmatch(head):
-                    raise GitActionError("Invalid local task branch SHA")
-                return head
-
+        # A local tip may still need approval. Base each commit on published history.
         parent = self._read_ref(target, ref)
         if not parent and self.task_branch_repository is not None:
             parent = self._read_ref(target, "HEAD")
         self._fetch_parent(gitdir, target, parent)
-        if self.task_branch_repository is not None:
-            if self._git([*gitdir, "symbolic-ref", "HEAD", ref]).returncode:
-                raise GitActionError("Cannot prepare the local task branch")
-            if parent:
-                self._update_local_branch(gitdir, ref, parent, None)
         return parent
 
     def _push_status(self, gitdir, target, ref, sha):

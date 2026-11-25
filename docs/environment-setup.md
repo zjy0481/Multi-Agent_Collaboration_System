@@ -205,7 +205,7 @@ $env:COLLABORATION_GITHUB_TARGET = @{
 .\.venv\Scripts\python.exe -m uvicorn collaboration_runtime.api:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-需要 Git 分支时，Agent 可以调用 `prepare_git_branch`，也可以直接用 `create_git_commit` 自动建分支并提交。平台按正式委派任务 ID 生成 `macs/task-<id>`。普通任务按原始消息归属分支，继续原任务时可回复原消息。新建分支使用远端默认分支作为起点。已存在的任务分支沿用自己的提交历史。
+需要 Git 分支时，Agent 可以调用 `prepare_git_branch`，也可以直接用 `create_git_commit` 自动建分支并提交。平台按正式委派任务 ID 生成 `macs/task-<id>`。普通任务按原始消息归属分支，继续原任务时可回复原消息。新建分支使用远端默认分支作为起点，后续提交以该任务分支的已发布版本为父提交。
 
 创建本地分支、从已配置仓库读取分支信息、在当前任务内创建本地提交和查询推送结果都无需逐次审批。首次推送会在 GitHub 创建远端分支，后续推送会更新同一分支。每次都需要在工作台批准卡片上展示的仓库、完整 ref 和提交 SHA。批准后，平台推送获准提交并读回目标 ref，SHA 匹配时标记为 `succeeded`。明确拒绝时标记为 `failed`，结果未知时标记为 `pending_verification`，重启后重新读取该 ref。
 

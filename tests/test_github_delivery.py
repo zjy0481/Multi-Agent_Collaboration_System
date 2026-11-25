@@ -76,9 +76,14 @@ def github(tmp_path, monkeypatch):
     return remote, calls, observations
 
 
-def application(tmp_path, model, *, schedule=True):
-    return create_app(model=model, sandbox=FileSandbox(), state_dir=tmp_path / "state",
+def application(tmp_path, model, *, schedule=True, sandbox=None):
+    return create_app(model=model, sandbox=sandbox or FileSandbox(), state_dir=tmp_path / "state",
                       bootstrap=bootstrap, operator_token=OPERATOR, schedule=schedule)
+
+
+class TaskBranchSandbox(FileSandbox):
+    def read_bytes(self, workspace_id, path):
+        return path.encode()
 
 
 class TaskBranchModel:
@@ -97,7 +102,7 @@ class TaskBranchModel:
                 return tool("prepare_git_branch", prefix + "-branch", {})
             assert results[prefix + "-branch"]["ok"]
         if prefix + "-commit" not in results:
-            return tool("create_git_commit", prefix + "-commit", {"paths": ["demo.txt"], "message": message["text"]})
+            return tool("create_git_commit", prefix + "-commit", {"paths": [prefix + ".txt"], "message": message["text"]})
         commit = results[prefix + "-commit"]
         assert commit["ok"], commit
         return tool("request_push", prefix + "-push", {"request_id": prefix, "sha": commit["result"]["sha"]})
@@ -133,7 +138,7 @@ def test_task_branch_is_created_locally_then_published_and_reused(tmp_path, gith
         assert client.post(endpoint, json=body, headers=auth(OPERATOR)).is_success
         wait_until(lambda: action(client, base, member_token, approval["action_id"])["status"] == expected)
 
-    with TestClient(application(tmp_path, TaskBranchModel())) as client:
+    with TestClient(application(tmp_path, TaskBranchModel(), sandbox=TaskBranchSandbox())) as client:
         base, lead, _, tokens = setup_team(client)
         member_token = tokens[lead["member_id"]]
         first_message = send(client, base, OPERATOR, request_id="work", text="first change")
@@ -147,19 +152,28 @@ def test_task_branch_is_created_locally_then_published_and_reused(tmp_path, gith
         decide(client, first, "approve", "succeeded")
         assert branch_tip(ref) == first["sha"]
 
-    with TestClient(application(tmp_path, TaskBranchModel())) as client:
+    with TestClient(application(tmp_path, TaskBranchModel(), sandbox=TaskBranchSandbox())) as client:
         send(client, base, OPERATOR, request_id="follow-up", text="second change", reply_to=first_message["message_id"])
         second = pending(client)
         assert second["ref"] == ref and branch_tip(ref) == first["sha"]
         decide(client, second, "approve", "succeeded")
         assert branch_tip(ref) == second["sha"]
         assert git("--git-dir", str(remote), "rev-parse", ref + "^") == first["sha"]
-        send(client, base, OPERATOR, request_id="other", text="independent work")
+        other_message = send(client, base, OPERATOR, request_id="other", text="independent work")
         other = pending(client)
         assert other["ref"] != ref
         decide(client, other, "reject", "rejected")
         assert not branch_tip(other["ref"])
-        assert calls.count("push") == 2 and read_ref(remote) == base_sha
+        retry = send(client, base, OPERATOR, request_id="other-follow-up", text="revised work",
+                     reply_to=other_message["message_id"])
+        replacement = pending(client)
+        assert replacement["ref"] == other["ref"]
+        decide(client, replacement, "approve", "succeeded")
+        assert git("--git-dir", str(remote), "rev-parse", replacement["ref"] + "^") == base_sha
+        assert git("--git-dir", str(remote), "ls-tree", "--name-only", replacement["ref"]).splitlines() == sorted([
+            "base.txt", retry["message_id"] + ".txt",
+        ])
+        assert calls.count("push") == 3 and read_ref(remote) == base_sha
 
 
 def test_delegated_tasks_derive_branches_from_task_id_across_revisions(tmp_path, github, monkeypatch):
