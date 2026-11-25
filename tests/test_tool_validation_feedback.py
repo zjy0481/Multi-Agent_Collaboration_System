@@ -3,6 +3,9 @@ from types import SimpleNamespace
 
 from collaboration_runtime.delegation_tools import DelegationTools
 from collaboration_runtime.teams import TeamNotFound
+from collaboration_runtime.delegation import DelegationService, TaskTerms
+from collaboration_runtime.collaboration import CollaborationInvalid
+import pytest
 
 
 class Auth:
@@ -66,3 +69,19 @@ def test_get_task_not_found_has_uniform_recovery_guidance():
     assert conflict["status"] == 422 and "compact=true or omit compact" in conflict["error"]
     schema = next(item["function"] for item in tool.tools_for("session") if item["function"]["name"] == "list_delegation")
     assert "omit compact" in schema["parameters"]["properties"]["compact"]["description"]
+
+
+def test_output_grants_guidance_is_member_to_relative_paths_and_value_free():
+    schema = TaskTerms.model_json_schema()["properties"]["output_grants"]
+    assert schema["examples"] == [{"member-id": ["reports/result.md"]}]
+    assert "workspace-relative" in schema["description"] and "Do not use paths as keys" in schema["description"]
+    base = {"deliverables": ["result"], "acceptance_criteria": ["done"],
+            "owner_id": "owner", "reviewer_id": "reviewer"}
+    terms = TaskTerms(**base, output_grants={"private/path.md": ["member-id"]}).normalized()
+    record = {"required_member_ids": [], "terms": terms}
+    with pytest.raises(CollaborationInvalid) as caught:
+        DelegationService._validate_terms(None, "team", None, {"member-id": object()}, record)
+    message = str(caught.value)
+    assert "member_id keys" in message and "workspace-relative" in message and "roster" in message
+    assert "private/path.md" not in message
+    assert TaskTerms(**base, output_grants={"member-id": ["reports/result.md"]}).normalized()["output_grants"] == {"member-id": ["reports/result.md"]}
