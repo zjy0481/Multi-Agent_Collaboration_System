@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
 from collaboration_runtime.search import SearchClient
-from collaboration_runtime.source_fetch import SourceHTTPError, fetch_public_source
+from collaboration_runtime.source_fetch import SourceHTTPError, SourceReadError, fetch_public_source
 from test_collaboration import Model, Sandbox, bootstrap, setup_team, OPERATOR
 
 
@@ -32,6 +32,7 @@ def test_degraded_source_and_exact_session_provenance(tmp_path, monkeypatch):
         async def execute(session, name, args):
             return await application.state.workspace.execute(session, name, json.dumps(args))
         result = client.portal.call(execute, lead['session_id'], 'search_web', {'query': 'paper'})
+        assert result['result']['evidence_kind'] == 'search_excerpt'
         assert result['result']['upstream_status'] == 'degraded'
         assert result['result']['provider'] == 'searxng'
         assert result['result']['fallback_reason'] == 'Exa returned HTTP 429'
@@ -42,6 +43,7 @@ def test_degraded_source_and_exact_session_provenance(tmp_path, monkeypatch):
         selected = client.portal.call(execute, lead['session_id'], 'read_source',
                                       {'search_id': search_id, 'result_id': 1, 'max_chars': 8})
         assert selected['result']['url'] == 'https://public.example/paper'
+        assert selected['result']['evidence_kind'] == 'source_text'
         assert selected['result']['text'] == 'original'
         assert selected['result']['text_range'] == {'start_char': 0, 'end_char': 8, 'total_chars': 15}
         full = client.portal.call(execute, lead['session_id'], 'get_source', {'source_id': selected['result']['source_id']})
@@ -58,7 +60,8 @@ def test_degraded_source_and_exact_session_provenance(tmp_path, monkeypatch):
         cross_scope = client.portal.call(execute, others[0]['session_id'], 'read_source', {'search_id': search_id, 'result_id': 1})
         assert not cross_scope['ok']
         denied = client.portal.call(execute, lead['session_id'], 'read_source', {'search_id': search_id, 'url': 'https://public.example/other'})
-        assert not denied['ok']
+        assert not denied['ok'] and denied['code'] == 'source_result_mismatch'
+        assert 'get_search_result' in denied['next_action']
         source = client.portal.call(execute, lead['session_id'], 'read_source', {'search_id': search_id, 'url': 'https://public.example/paper'})
         assert source['result']['text'] == 'original source'
         record = client.portal.call(execute, lead['session_id'], 'get_source', {'source_id': source['result']['source_id']})
@@ -73,9 +76,21 @@ def test_degraded_source_and_exact_session_provenance(tmp_path, monkeypatch):
         rejected = client.portal.call(execute, lead['session_id'], 'read_source',
                                       {'search_id': search_id, 'result_id': 1})
         assert not rejected['ok'] and rejected['status'] == 403
+        assert rejected['code'] == 'source_http_status'
         assert rejected['error'] == 'Source returned HTTP 403'
         assert 'different accessible public source' in rejected['next_action']
         assert 'result' not in rejected
+
+        monkeypatch.setattr('collaboration_runtime.workspace.fetch_public_source', fetch_public_source)
+        monkeypatch.setattr(socket, 'getaddrinfo',
+                            lambda *a, **k: [(None, None, None, None, ('198.18.0.42', 443))])
+        rejected = client.portal.call(execute, lead['session_id'], 'read_source',
+                                      {'search_id': search_id, 'result_id': 1})
+        assert not rejected['ok'] and rejected['code'] == 'source_non_public_address'
+        assert 'operator' in rejected['next_action'] and 'not source text' in rejected['next_action']
+        assert 'result' not in rejected and '198.18.0.42' not in json.dumps(rejected)
+        assert client.portal.call(lambda: application.state.workspace.db.execute(
+            'SELECT count(*) FROM workspace_sources').fetchone()[0]) == 2
 
 
 def test_private_resolved_addresses_are_rejected(monkeypatch):
@@ -84,6 +99,18 @@ def test_private_resolved_addresses_are_rejected(monkeypatch):
     monkeypatch.setattr(socket, 'getaddrinfo', lambda *args, **kwargs: [(None, None, None, None, ('127.0.0.1', 443))])
     with pytest.raises(SearchError, match='non-public'):
         fetch_public_source('https://example.test/private')
+
+
+def test_dns_failure_is_distinct_from_non_public_address(monkeypatch):
+    import pytest
+
+    def unresolved(*_args, **_kwargs):
+        raise socket.gaierror('system resolver diagnostic')
+
+    monkeypatch.setattr(socket, 'getaddrinfo', unresolved)
+    with pytest.raises(SourceReadError, match='Source DNS lookup failed') as caught:
+        fetch_public_source('https://example.test/')
+    assert caught.value.code == 'source_dns_failed'
 
 
 def test_redirects_are_pinned_and_recorded(monkeypatch):

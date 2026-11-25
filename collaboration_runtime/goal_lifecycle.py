@@ -61,16 +61,18 @@ class TerminalInput(Command):
     outcome: Literal["completed", "failed", "cancelled"]
     reason: Text | None = None
     evidence: Notes = Field(default_factory=list)
-    final_version_ids: Versions = Field(default_factory=list)
+    final_version_ids: Versions = Field(default_factory=list, description="For completed goals, supply these or confirmation, but not both.")
     confirmation: str | None = Field(default=None, min_length=64, max_length=64,
-        description="Confirmation from get_goal.close_preview binding exact approvals.")
+        description="For completed goals, use get_goal.close_preview.confirmation alone, or supply final_version_ids instead.")
 
     @model_validator(mode="after")
     def valid_outcome(self):
-        if self.confirmation and (self.outcome != "completed" or self.final_version_ids):
+        if self.confirmation and self.outcome == "completed" and self.final_version_ids:
+            raise PydanticCustomError("close_evidence_exclusive", "Confirmation and final versions are mutually exclusive")
+        if self.confirmation and self.outcome != "completed":
             raise ValueError("Use a preview confirmation alone for a completed goal")
         if self.outcome == "completed" and not (self.final_version_ids or self.confirmation):
-            raise ValueError("A completed goal requires readable final versions")
+            raise PydanticCustomError("close_evidence_required", "Completion requires confirmation or final versions")
         if self.outcome == "failed" and (self.reason is None or not self.evidence):
             raise ValueError("A failed goal requires a reason and evidence")
         return self
@@ -122,7 +124,8 @@ TOOLS = {
     ),
     "close_goal": (
         CloseGoalTool,
-        "As Lead, complete a goal after all required current reviews and blockers pass, or fail it with evidence.",
+        "As Lead, complete a goal after all required current reviews and blockers pass, or fail it with evidence. "
+        "For completion use get_goal.close_preview.confirmation alone, or final_version_ids alone; never both.",
     ),
     "activate_goal": (
         ActivateGoalTool,
@@ -765,7 +768,7 @@ class GoalLifecycle:
                 JOIN scheduled_turns s USING(event_id, session_id, purpose)
                 JOIN turns t ON t.id = s.turn_id
                 WHERE d.message_id IN ({placeholders})
-                  AND t.status IN ('running', 'recoverable', 'waiting_human', 'waiting_approval')
+                  AND t.status IN ('running', 'recoverable', 'yielded', 'waiting_human', 'waiting_approval')
             """, tuple(scope["message_ids"])).fetchall()
             for delivery in scheduled:
                 if delivery["turn_id"] == confirming_turn_id:
@@ -1187,6 +1190,13 @@ class GoalLifecycle:
             if any(item["code"] == "duplicate_required_task" for item in errors):
                 return {"ok": False, "status": 422, "errors": errors,
                         "error": "Use one required delivery per task_id; submit multiple files through submit_result"}
+            if any(item["code"] == "close_evidence_exclusive" for item in errors):
+                return {"ok": False, "status": 422, "error":
+                        "confirmation and final_version_ids are mutually exclusive; use only one"}
+            if any(item["code"] == "close_evidence_required" for item in errors):
+                return {"ok": False, "status": 422, "error":
+                        "For completion provide either get_goal.close_preview.confirmation or final_version_ids; "
+                        "prefer the current preview confirmation"}
             return {"ok": False, "error": "Invalid goal tool arguments", "status": 422}
         except (TeamNotFound, TeamConflict, CollaborationForbidden, CollaborationInvalid) as exc:
             status = {TeamNotFound: 404, TeamConflict: 409,

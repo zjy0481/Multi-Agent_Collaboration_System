@@ -30,7 +30,10 @@ class TaskTerms(Command):
     dependency_ids: Members = Field(default_factory=list)
     parent_task_id: ObjectId | None = None
     output_grants: dict[ObjectId, TermsList] = Field(default_factory=dict, max_length=100,
-        description="Members allowed to depend on named output paths. Existing artifact ACLs still apply.")
+        description=('Map each formal team member_id to a list of workspace-relative output paths, for example '
+                     '{"member-id": ["reports/result.md"]}. Do not use paths as keys. Get member IDs from list_participants. '
+                     'Existing artifact ACLs still apply.'),
+        examples=[{"member-id": ["reports/result.md"]}])
 
     def normalized(self):
         terms = self.model_dump()
@@ -354,7 +357,11 @@ class DelegationService:
         required = set(record["required_member_ids"])
         terms = record["terms"]
         if not terms.get("output_grants", {}).keys() <= members.keys():
-            raise CollaborationInvalid("Output grants must identify formal team members")
+            raise CollaborationInvalid(
+                'Output grants must identify formal team members. Use member_id keys and lists of workspace-relative '
+                'output paths as values, for example {"member-id": ["reports/result.md"]}. '
+                'Check member IDs in the roster with list_participants.'
+            )
         if not required <= members.keys():
             raise CollaborationInvalid("Commitments must identify formal team members")
         participants = [members[member_id] for member_id in sorted(required | {actor.id})]

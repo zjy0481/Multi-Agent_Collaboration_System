@@ -31,6 +31,11 @@ def test_freeze_from_preview_and_reject_changed_approval(tmp_path):
         approve(2)
         stale = terminate(client, base, tokens[lid], goal, 2, "completed", confirmation=preview["confirmation"])
         assert stale.status_code == 409
+        import json
+        stale_tool = client.portal.call(client.app.state.collaboration.execute_tool, lead['session_id'], 'close_goal',
+                                        json.dumps({'goal_id': goal, 'request_id': key(), 'expected_revision': 2,
+                                                    'outcome': 'completed', 'confirmation': preview['confirmation']}))
+        assert stale_tool['status'] == 409 and 'fresh close preview' in stale_tool['error']
         current = lifecycle(client, base, tokens[lid], goal)["close_preview"]
         receipt = ok(terminate(client, base, tokens[lid], goal, 2, "completed", confirmation=current["confirmation"]))
         assert receipt["frozen_summary"]["accepted_deliveries"] == 1
@@ -93,3 +98,29 @@ def test_restricted_submission_reports_action_without_leaking_reference(tmp_path
         assert preview["blockers"] and not preview["confirmation"]
         assert private["version_id"] not in str(preview)
         assert sent["handoff"] == "lead_access_required"
+
+
+def test_close_tool_explains_completion_argument_choices(tmp_path):
+    import json
+    with TestClient(app(tmp_path)) as client:
+        base, lead, _, tokens, goal = context(client)
+        service = client.app.state.collaboration
+        def call(**extra):
+            args = {'goal_id': goal, 'request_id': key(), 'expected_revision': 1,
+                    'outcome': 'completed', **extra}
+            return client.portal.call(service.execute_tool, lead['session_id'], 'close_goal', json.dumps(args))
+        secret_confirmation = 'a' * 64
+        secret_version = 'b' * 32
+        both = call(confirmation=secret_confirmation, final_version_ids=[secret_version])
+        assert both['status'] == 422 and 'mutually exclusive' in both['error']
+        assert secret_confirmation not in str(both) and secret_version not in str(both)
+        missing = call()
+        assert missing['status'] == 422 and 'get_goal.close_preview.confirmation' in missing['error']
+        assert 'final_version_ids' in missing['error']
+        unrelated = call(expected_revision='invalid')
+        assert unrelated['error'] == 'Invalid goal tool arguments'
+        assert 'invalid' not in str(unrelated)
+        schema = next(t for t in client.portal.call(service.goal_lifecycle.tools_for, lead['session_id'])
+                      if t['function']['name'] == 'close_goal')
+        assert 'never both' in schema['function']['description']
+        assert lifecycle(client, base, tokens[lead['member_id']], goal)['goal']['status'] == 'active'

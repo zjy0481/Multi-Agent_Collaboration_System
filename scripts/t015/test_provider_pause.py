@@ -9,7 +9,7 @@ class PauseTest(unittest.TestCase):
     def test_phase_preserves_goal(self):
         s = run_five.Scenario.__new__(run_five.Scenario)
         s.name, s.team, s.sample, s.fixture = 'newsroom', {'team_id':'team'}, Path('.'), None
-        s.fresh_software = False
+        s.fresh_software = s.sequential = False
         s.stage_seconds, s.grace_seconds, s.idle_seconds = 1, 0, 45
         s.assignment_ids, s.model = [], SimpleNamespace(paused_reason='HTTP 402')
         s.send = lambda *a, **kw: {'message_id':'source'}

@@ -28,7 +28,7 @@ def test_stage_guidance_is_scoped():
     assert _delivery_guidance(payload('task.approved'), 'lead') is None
     assert 'close_goal' in _delivery_guidance(payload('task.approved', goal_close_ready=True), 'lead')['closure']
     assert 'assign_task' in _delivery_guidance(payload('delegation.proposal', proposal_action='assign_task'))['proposal']
-    assert _delivery_guidance(payload('delegation.proposal')) is None
+    assert 'formal task delivery' in _delivery_guidance(payload('delegation.proposal'))['proposal']
 
 
 def test_compaction_retains_stage_guidance():
@@ -134,3 +134,4 @@ def test_first_delivery_guides_other_course_teams(tmp_path, sample_prefix, lead_
         delivery = {"delivery": {"purpose": "task.ready"}, "task": {"terms": {"owner_id": owner["member_id"]}}}
         guidance = _delivery_guidance(delivery, owner["member_id"])["delivery"]
         assert "publish the exact result and evidence" in guidance and "submit_result" in guidance
+        assert "before running optional checks" in guidance

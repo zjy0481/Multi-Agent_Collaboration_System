@@ -105,7 +105,7 @@ class TaskResults:
                 and actor.session_id in self.artifacts.reference_readers(source["team_id"], v["version_id"])]
 
     def dependency_handoff(self, task, actor):
-        outputs, blockers = {}, {}
+        outputs, blockers, guidance = {}, {}, {}
         for dependency in task["terms"]["dependency_ids"]:
             source = self.delegation._task(task["team_id"], dependency)
             paths = source["terms"].get("output_grants", {}).get(actor.id)
@@ -121,9 +121,26 @@ class TaskResults:
                                              if paths is None or v["source_path"] in paths)
                 if not complete:
                     blockers[dependency] = "publisher_action_required"
+                    guidance[dependency] = ("Ask the dispatcher to compare exact output_grants paths with "
+                                            "approved source paths and correct the grant if needed; "
+                                            "republish only when reader access is missing.")
+                    # Only source-task readers may see approved paths, and only when
+                    # the artifact itself is readable. Basenames never authorize access.
+                    if paths is not None and self.delegation._can_read(task["team_id"], actor, source):
+                        matches = [(grant, v["source_path"]) for grant in paths for v in fact["versions"]
+                                   if grant != v["source_path"]
+                                   and grant.rsplit("/", 1)[-1] == v["source_path"].rsplit("/", 1)[-1]
+                                   and actor.session_id in self.artifacts.reference_readers(
+                                       task["team_id"], v["version_id"])]
+                        if matches:
+                            guidance[dependency] += " Exact path candidates: " + ", ".join(
+                                f"{grant} -> {actual}" for grant, actual in sorted(set(matches))[:5]) + "."
             else:
                 blockers[dependency] = "awaiting_approval"
-        return {"dependency_outputs": outputs, "dependency_blockers": blockers}
+        result = {"dependency_outputs": outputs, "dependency_blockers": blockers}
+        if guidance:
+            result["dependency_guidance"] = guidance
+        return result
 
     def _owner_outputs(self, task):
         if not task["terms"]["dependency_ids"]:

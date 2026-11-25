@@ -101,3 +101,59 @@ def test_t2_ready_needs_both_roles_and_scoped_published_report(monkeypatch):
     assert handoff.audit_t2_handoff(app,team,'t2',previous)['dashboard_evidence_ready']
     receipts.pop()
     assert not handoff.audit_t2_handoff(app,team,'t2',previous)['dashboard_evidence_ready']
+    def invalid_schema(*args):
+        raise ValueError('schema room/date/start/end/status must be exact existing column names, not descriptions')
+    monkeypatch.setattr(handoff, '_metrics', invalid_schema)
+    audit = handoff.audit_t2_handoff(app, team, 't2', previous)
+    assert audit['matches_report'] is None and not audit['dashboard_evidence_ready']
+    assert any('exact existing' in item and 'not descriptions' in item for item in audit['limitations'])
+
+
+def test_t1_selects_provenance_linked_pair_and_never_mixes(monkeypatch):
+    from types import SimpleNamespace
+    lead = {'version_id': 'lead', 'valid': True, 'readable': True, 'sha256': 'lead-hash'}
+    dev = {'version_id': 'dev', 'valid': True, 'readable': True, 'sha256': 'dev-hash'}
+    db = {'version_id': 'db', 'valid': True, 'readable': True, 'sha256': 'db-hash'}
+    prov = {'version_id': 'provenance', 'valid': True, 'readable': True,
+            'data': {'app_version_id': 'lead', 'app_sha256': 'lead-hash', 'database_sha256': 'db-hash'}}
+    candidates = {'t1-app.zip': [dev, lead], 't1-bookings.sqlite3': [db], 't1-data-provenance.json': [prov]}
+    frozen = {'final_versions': [], 'task_acceptance': {}}
+    terminal = {'outcome': 'cancelled', 'frozen': frozen}
+    monkeypatch.setattr(handoff, '_context', lambda *a: (None, None, terminal, set()))
+    monkeypatch.setattr(handoff, '_artifacts', lambda *a: candidates)
+    monkeypatch.setattr(handoff, '_receipts', lambda *a: [])
+    result = handoff.audit_t1_handoff(SimpleNamespace(), {}, 'assignment')
+    assert (result['app_version_id'], result['database_version_id']) == ('lead', 'db')
+    assert result['provenance_hashes_match'] and result['pair_selection'] == 'diagnostic'
+    assert not result['strict_ready']
+    lead['readable'] = False
+    result = handoff.audit_t1_handoff(SimpleNamespace(), {}, 'assignment')
+    assert result['app_version_id'] is None and result['database_version_id'] is None
+    assert not result['provenance_hashes_match'] and result['pair_selection'] == 'unavailable'
+    lead['readable'] = True
+    second = {'version_id': 'p2', 'valid': True, 'readable': True,
+              'data': {'app_version_id': 'dev', 'app_sha256': 'dev-hash', 'database_sha256': 'db-hash'}}
+    candidates['t1-data-provenance.json'].insert(0, second)
+    frozen['final_versions'] = [{'version_id': 'lead'}, {'version_id': 'db'}]
+    frozen['task_acceptance'] = {'task': {'versions': [{'version_id': 'lead'}, {'version_id': 'db'}]}}
+    result = handoff.audit_t1_handoff(SimpleNamespace(), {}, 'assignment')
+    assert result['app_version_id'] == 'lead' and result['pair_selection'] == 'approved'
+
+
+def test_metrics_integer_rooms_and_exact_schema_names(tmp_path):
+    path = tmp_path / 'integer-rooms.db'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE bookings (room_id INTEGER, day TEXT, starts TEXT, ends TEXT, status TEXT)')
+        db.executemany('INSERT INTO bookings VALUES (?,?,?,?,?)', [
+            (1, '2030-05-06', '10:00', '11:00', 'cancelled'),
+            (1, '2030-05-06', '13:00', '14:00', 'active'),
+            (1, '2030-05-06', '10:00', '11:00', 'active'),
+        ])
+    schema = {'table': 'bookings', 'room': 'room_id', 'date': 'day', 'start': 'starts', 'end': 'ends',
+              'status': 'status', 'active_values': ['active'], 'cancelled_values': ['cancelled']}
+    metrics = handoff._metrics(path, schema, '2030-05-06', '2030-05-06')
+    assert metrics['total_count'] == 2 and metrics['total_minutes'] == 120 and metrics['cancelled_count'] == 1
+    assert metrics['rooms'] == {'1': {'count': 2, 'minutes': 120, 'cancelled_count': 1}}
+    for field, bad in [('table', 'missing'), ('room', 'room_id INTEGER REFERENCES rooms(id)'), ('date', 'missing')]:
+        with pytest.raises(ValueError, match='exact existing'):
+            handoff._metrics(path, {**schema, field: bad}, '2030-05-06', '2030-05-06')
