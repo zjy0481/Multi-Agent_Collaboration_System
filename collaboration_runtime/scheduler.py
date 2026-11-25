@@ -24,6 +24,9 @@ def _delivery_guidance(payload, actor_id=None):
     if purpose == 'goal.terminal':
         return {'activation': ('Use next_goal_activation to activate the earliest eligible queued goal. '
                                'Finish this notification after the tool receipt so the next delivery can run.')}
+    if purpose == 'message.correction':
+        return {'correction': ('Apply the verified change to the referenced work, then yield for the pending task. '
+                               'Use the existing candidate and record any effect on its review.')}
     if purpose == 'task.submitted':
         return {'review': ('Use the task revision and submitted versions in this delivery. Review those versions against '
                            'the acceptance criteria and traceable evidence. Report a specific gap or decision for each '
@@ -32,6 +35,8 @@ def _delivery_guidance(payload, actor_id=None):
         return {'assignment': ('Register the goal and propose the smallest complete outcome a reviewer can check. '
                                'Clarify blockers and start independent work before expanding the plan. '
                                'Name one primary deliverable, its owner, reviewer and readers. '
+                               'Let that owner publish the primary candidate. Prepare independent checks against '
+                               'the same candidate. If ownership must change, register the change before work shifts. '
                                'Use output_grants and dependency_ids for work that consumes another task output. '
                                'End this turn when waiting for confirmations.')}
     if purpose == 'delegation.proposal':
@@ -71,6 +76,11 @@ class DeliveryScheduler:
         with self.db:
             self.db.execute('BEGIN IMMEDIATE')
             candidates = self.db.execute('''
+                WITH waiting AS (
+                    SELECT t.role, json_extract(e.payload, '$.queued_through') AS queued_through
+                    FROM turns t JOIN events e ON e.turn_id = t.id
+                    WHERE t.status = 'yielded' AND e.type = 'turn.delivery_yielded'
+                )
                 SELECT d.event_id, d.message_id, d.session_id, d.purpose, d.status,
                        m.team_id, s.turn_id
                 FROM message_deliveries d
@@ -78,7 +88,8 @@ class DeliveryScheduler:
                 LEFT JOIN scheduled_turns s ON s.event_id = d.event_id
                     AND s.session_id = d.session_id AND s.purpose = d.purpose
                 LEFT JOIN turns t ON t.id = s.turn_id
-                WHERE ((t.status = 'recoverable' AND d.status = 'running')
+                LEFT JOIN waiting w ON w.role = d.session_id
+                WHERE ((t.status IN ('recoverable', 'yielded') AND d.status = 'running')
                        OR (s.turn_id IS NULL AND d.status = 'pending'))
                   AND NOT EXISTS (
                       SELECT 1 FROM turns live WHERE live.role = d.session_id
@@ -87,10 +98,15 @@ class DeliveryScheduler:
                   )
                 ORDER BY CASE WHEN t.status = 'recoverable' THEN 0
                               WHEN m.kind = 'assignment' THEN 1
+                              WHEN s.turn_id IS NULL AND d.event_id > w.queued_through
+                               AND m.kind <> 'supplement'
+                               AND d.purpose NOT IN ('clarification.resume', 'clarification.correction') THEN 5
                               WHEN m.kind = 'supplement' OR d.purpose IN (
-                                  'task.submitted', 'task.approved', 'clarification.resume', 'clarification.correction') THEN 2
+                                  'task.submitted', 'task.approved', 'message.correction',
+                                  'clarification.resume', 'clarification.correction') THEN 2
                               WHEN d.purpose IN ('task.assigned', 'task.updated', 'task.ready', 'task.returned') THEN 3
-                              ELSE 4 END, d.event_id
+                              WHEN t.status = 'yielded' THEN 4
+                              ELSE 5 END, d.event_id
             ''').fetchall()
             for row in candidates:
                 delivery = dict(row)
@@ -150,7 +166,7 @@ class DeliveryScheduler:
                         if fork_message_id is not None:
                             self.runtime._write_finish(delivery['turn_id'], 'interrupted', error='Fork delivery scope ended')
                         else:
-                            self.db.execute("UPDATE turns SET status = 'interrupted', error = ? WHERE id = ? AND status = 'recoverable'",
+                            self.db.execute("UPDATE turns SET status = 'interrupted', error = ? WHERE id = ? AND status IN ('recoverable', 'yielded')",
                                             ('Delivery identity or input unavailable', delivery['turn_id']))
             return None
 

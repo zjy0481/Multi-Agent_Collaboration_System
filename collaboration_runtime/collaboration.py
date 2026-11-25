@@ -45,11 +45,11 @@ class MessageFields(Command):
 
 
 class MemberMessageInput(MessageFields):
-    kind: Literal["chat", "progress"] = "chat"
+    kind: Literal["chat", "progress", "correction"] = "chat"
 
 
 class MessageInput(MessageFields):
-    kind: Literal["chat", "progress", "assignment", "supplement"] = "chat"
+    kind: Literal["chat", "progress", "assignment", "supplement", "correction"] = "chat"
     required_inputs: Annotated[list[RequiredInput], Field(default_factory=list, max_length=100)]
     assignment_guidance: Annotated[str, StringConstraints(max_length=4000)] | None = None
 
@@ -443,6 +443,13 @@ class CollaborationService:
                 raise CollaborationInvalid("Required input owner must be a formal team member")
             if body.kind == "supplement" and (not source or source["kind"] != "assignment"):
                 raise CollaborationInvalid("A supplement must reference the original assignment")
+            if body.kind == "correction":
+                targets = [recipient] if recipient in members else mentions
+                if not source or len(targets) != 1:
+                    raise CollaborationInvalid("A correction must reply to a message and identify one formal member")
+                correction_goal = self.goal_for_message(team_id, source["id"])
+                if correction_goal is None or not self.goal_lifecycle.scope_is_open(correction_goal):
+                    raise CollaborationInvalid("A correction must refer to a message in an active goal")
 
             receipt = self._create_message(team_id, actor, recipient=recipient, text=body.text,
                                            kind=body.kind, mentions=mentions, reply_to=body.reply_to)
@@ -467,7 +474,8 @@ class CollaborationService:
                         targets = [recipient]
                     elif recipient is None and actor.is_operator:
                         targets = [team["lead_member_id"]]
-                self._deliver(receipt, (members[target] for target in targets), "message")
+                purpose = "message.correction" if body.kind == "correction" else "message"
+                self._deliver(receipt, (members[target] for target in targets), purpose)
             self._save_receipt(key, digest, receipt)
             return receipt
 
@@ -539,6 +547,8 @@ class CollaborationService:
             payload["source_message"] = self.get_message(actor.team_id, actor, delivery["source_message_id"])
             payload["answers"] = [self.get_message(actor.team_id, actor, answer_id)
                                   for answer_id in delivery["answer_message_ids"]]
+        elif delivery["purpose"] == "message.correction":
+            payload["source_message"] = self.get_message(actor.team_id, actor, message["reply_to"])
         if self.delegation is not None:
             context = self.delegation.execution_context(message["id"], actor)
             if context is not None:
@@ -765,7 +775,9 @@ class CollaborationService:
 TOOLS = {
     "list_participants": (Command, "List the participant IDs and names in your team."),
     "get_message": (ReadMessageInput, "Read a visible message by ID."),
-    "send_message": (MemberMessageInput, "Send a team chat or progress update. Use mentions for a directed group message or recipient_id for a bilateral message."),
+    "send_message": (MemberMessageInput, "Send a team chat or progress update. Use mentions for a directed group "
+                     "message or recipient_id for a bilateral message. Use correction with reply_to and one formal "
+                     "recipient when a verified correction changes that member's active work."),
     "register_goal": (GoalInput, "As Lead, register the user's original assignment by message ID."),
     "ask_human": (QuestionInput, "Ask the user a blocking question about a message delivered to your session. "
                   "Pass its message ID. This pauses the turn until a quoted reply makes that work ready again."),

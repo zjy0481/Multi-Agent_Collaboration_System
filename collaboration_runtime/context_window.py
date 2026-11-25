@@ -29,7 +29,7 @@ def _compact_delivery(message):
     if payload.get("answers"):
         keep["answer_message_ids"] = [answer["id"] for answer in payload["answers"]]
         keep["latest_answer"] = payload["answers"][-1]
-    for key in ("dependency_outputs", "dependency_blockers"):
+    for key in ("dependency_outputs", "dependency_blockers", "dependency_guidance"):
         if key in payload:
             keep[key] = payload[key]
     for key in ("task", "proposal", "result_reference"):

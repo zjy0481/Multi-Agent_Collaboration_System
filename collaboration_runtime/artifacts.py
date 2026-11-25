@@ -13,6 +13,8 @@ import re
 import sqlite3
 import uuid
 
+from .atomic_move import move_artifact_directory
+
 
 class ArtifactError(RuntimeError):
     """Invalid input, version conflict, or storage failure."""
@@ -94,7 +96,7 @@ class ArtifactStore:
                 os.fsync(handle.fileno())
             if final.exists():
                 raise ArtifactError("version storage already exists")
-            os.rename(stage, final)
+            move_artifact_directory(stage, final)
             created_stage, created_final = False, True
             self.db.execute(f"SAVEPOINT {savepoint}")
             existing = self.db.execute(
@@ -126,7 +128,7 @@ class ArtifactStore:
                     pass
             if isinstance(exc, ArtifactError):
                 raise
-            raise ArtifactError("could not publish artifact") from exc
+            raise ArtifactError("could not publish artifact") from None
         return {"version_id": version_id, "artifact_id": artifact_id, "team_id": team_id,
                 "author_session_id": author_session_id, "source_path": source_path,
                 "version": version, "reader_session_ids": readers, "size": len(content),

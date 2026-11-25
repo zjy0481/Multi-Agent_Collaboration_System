@@ -101,6 +101,12 @@ def test_t2_ready_needs_both_roles_and_scoped_published_report(monkeypatch):
     assert handoff.audit_t2_handoff(app,team,'t2',previous)['dashboard_evidence_ready']
     receipts.pop()
     assert not handoff.audit_t2_handoff(app,team,'t2',previous)['dashboard_evidence_ready']
+    def invalid_schema(*args):
+        raise ValueError('schema room/date/start/end/status must be exact existing column names, not descriptions')
+    monkeypatch.setattr(handoff, '_metrics', invalid_schema)
+    audit = handoff.audit_t2_handoff(app, team, 't2', previous)
+    assert audit['matches_report'] is None and not audit['dashboard_evidence_ready']
+    assert any('exact existing' in item and 'not descriptions' in item for item in audit['limitations'])
 
 
 def test_t1_selects_provenance_linked_pair_and_never_mixes(monkeypatch):
@@ -132,3 +138,22 @@ def test_t1_selects_provenance_linked_pair_and_never_mixes(monkeypatch):
     frozen['task_acceptance'] = {'task': {'versions': [{'version_id': 'lead'}, {'version_id': 'db'}]}}
     result = handoff.audit_t1_handoff(SimpleNamespace(), {}, 'assignment')
     assert result['app_version_id'] == 'lead' and result['pair_selection'] == 'approved'
+
+
+def test_metrics_integer_rooms_and_exact_schema_names(tmp_path):
+    path = tmp_path / 'integer-rooms.db'
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE bookings (room_id INTEGER, day TEXT, starts TEXT, ends TEXT, status TEXT)')
+        db.executemany('INSERT INTO bookings VALUES (?,?,?,?,?)', [
+            (1, '2030-05-06', '10:00', '11:00', 'cancelled'),
+            (1, '2030-05-06', '13:00', '14:00', 'active'),
+            (1, '2030-05-06', '10:00', '11:00', 'active'),
+        ])
+    schema = {'table': 'bookings', 'room': 'room_id', 'date': 'day', 'start': 'starts', 'end': 'ends',
+              'status': 'status', 'active_values': ['active'], 'cancelled_values': ['cancelled']}
+    metrics = handoff._metrics(path, schema, '2030-05-06', '2030-05-06')
+    assert metrics['total_count'] == 2 and metrics['total_minutes'] == 120 and metrics['cancelled_count'] == 1
+    assert metrics['rooms'] == {'1': {'count': 2, 'minutes': 120, 'cancelled_count': 1}}
+    for field, bad in [('table', 'missing'), ('room', 'room_id INTEGER REFERENCES rooms(id)'), ('date', 'missing')]:
+        with pytest.raises(ValueError, match='exact existing'):
+            handoff._metrics(path, {**schema, field: bad}, '2030-05-06', '2030-05-06')

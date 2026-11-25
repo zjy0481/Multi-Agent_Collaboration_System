@@ -246,7 +246,7 @@ def test_formal_model_tools_use_the_execution_identity(tmp_path):
                 return {"role": "assistant", "content": messages[-1]["content"]}
             schema = next(tool["function"]["parameters"] for tool in tools
                           if tool["function"]["name"] == "send_message")
-            assert schema["properties"]["kind"]["enum"] == ["chat", "progress"]
+            assert schema["properties"]["kind"]["enum"] == ["chat", "progress", "correction"]
             assert "required_inputs" not in schema["properties"]
             assert schema["additionalProperties"] is False
             name, arguments = self.action
@@ -291,6 +291,11 @@ def test_formal_model_tools_use_the_execution_identity(tmp_path):
                 "recipient_id": outsider["member_id"],
             })
             assert sent["ok"] is True
+        private_correction = run_tool(lead, lead_token, "send_message", {
+            "request_id": "private-correction", "text": "Correction", "kind": "correction",
+            "recipient_id": outsider["member_id"], "reply_to": source["message_id"],
+        })
+        assert private_correction["status"] == 403
         for extra in ({"kind": "assignment"}, {"kind": "supplement"}, {"required_inputs": []}):
             denied = run_tool(lead, lead_token, "send_message", {
                 "request_id": "invalid-model", "text": "Invalid", **extra,

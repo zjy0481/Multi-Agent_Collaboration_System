@@ -172,10 +172,18 @@ def _metrics(path, schema, start, end):
     with closing(sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1', uri=True)) as con:
         con.execute('PRAGMA query_only=ON')
         con.execute('PRAGMA trusted_schema=OFF')
+        table = con.execute("SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name = ?",
+                            (schema['table'],)).fetchone()
+        if table is None:
+            raise ValueError('schema.table must be an exact existing table or view name')
+        columns = {row[1] for row in con.execute('PRAGMA table_info(' + q(schema['table']) + ')')}
+        if any(schema[k] not in columns for k in keys[1:]):
+            raise ValueError('schema room/date/start/end/status must be exact existing column names, not descriptions')
         sql = 'SELECT '+','.join(q(schema[k]) for k in keys[1:])+' FROM '+q(schema['table'])
         for room, day, begins, ends, status in con.execute(sql):
-            if not all(isinstance(v,str) for v in (room,day,begins,ends)):
+            if not isinstance(room, (str, int)) or not all(isinstance(v, str) for v in (day, begins, ends)):
                 raise ValueError('invalid row')
+            room = str(room)
             date.fromisoformat(day)
             a = datetime.strptime(begins,'%H:%M'); b = datetime.strptime(ends,'%H:%M')
             if b <= a: raise ValueError('overnight or invalid interval')
@@ -219,8 +227,10 @@ def audit_t2_handoff(app, team, t2_assignment_id, t1_handoff):
         _, path = store.resolve(team['team_id'], member['session_id'], wanted[1])
         result['independent_metrics'] = _metrics(path, schema, d['range_start'], d['range_end'])
         result['matches_report'] = result['independent_metrics'] == d['metrics']
-    except (KeyError, TypeError, ValueError, RuntimeError, sqlite3.Error, OSError, StopIteration):
-        result['limitations'].append('Independent recomputation unavailable: missing, mismatched or unsupported evidence/schema.')
+    except ValueError as exc:
+        result['limitations'].append(f'Independent recomputation unavailable: {exc}. Provide exact existing table and column names in provenance schema.')
+    except (KeyError, TypeError, RuntimeError, sqlite3.Error, OSError, StopIteration):
+        result['limitations'].append('Independent recomputation unavailable: missing, mismatched or unsupported evidence/schema. Provide exact existing table and column names in provenance schema.')
     role_sessions = {m['role_id']: m['session_id'] for m in team['members'] if m['role_id'] in ('dev','qa')}
     both_mount = all(any(r['session_id'] == role_sessions.get(role) and all(wanted)
                          and set(wanted) <= set(r['version_ids']) for r in receipts) for role in ('dev','qa'))
