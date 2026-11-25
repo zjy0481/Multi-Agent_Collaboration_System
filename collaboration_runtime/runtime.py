@@ -16,11 +16,14 @@ from .journal import ExecutionJournal, GOAL_CONFIRMATION_PHASE
 from .local_auth import OPERATOR_ID
 from .model import ModelError, ModelPaused, ModelUnavailable, complete_model, model_request_context
 from .sandbox import SandboxError
+from .teams import TeamNotFound
 from .workspace import WorkspaceNotFound
 
 logger = logging.getLogger(__name__)
 DEFAULT_MAX_STEPS = 20
 MAX_TOOL_CALLS_PER_DECISION = 8
+OWNER_DELIVERIES = ("task.assigned", "task.updated", "task.ready", "task.returned")
+READY_TO_SUBMIT = {"assigned", "ready", "returned"}
 
 ROLES = {
     "developer": "You are the developer. Implement and test the requested changes. "
@@ -243,7 +246,7 @@ class Runtime:
         if reason := getattr(self.model, "paused_reason", None):
             raise ModelPaused(reason)
         if self.closing or role in self.active or self.db.execute("""
-            SELECT 1 FROM turns WHERE role = ? AND status IN ('running', 'recoverable')
+            SELECT 1 FROM turns WHERE role = ? AND status IN ('running', 'recoverable', 'yielded')
         """, (role,)).fetchone():
             raise TurnConflict("The session already has a running turn or is shutting down")
         with self.db:
@@ -361,6 +364,89 @@ class Runtime:
         if not self.journal.advance(turn.id, turn.generation, step, phase, current):
             raise StaleTurn
 
+    def _yield_to_pending_delivery(self, turn, actor, goal_id):
+        """Yield a low-priority turn once, only between model requests."""
+        if not goal_id:
+            return False
+        pending = self.db.execute("""
+            SELECT d.event_id, d.message_id, d.purpose, m.kind FROM message_deliveries d
+            JOIN team_messages m ON m.id = d.message_id
+            WHERE d.session_id = ? AND d.status = 'pending'
+              AND (m.kind = 'supplement' OR d.purpose IN (
+                'task.assigned', 'task.updated', 'task.ready', 'task.returned',
+                'task.submitted', 'task.approved', 'message.correction', 'clarification.resume', 'clarification.correction'))
+            ORDER BY d.event_id
+        """, (actor.session_id,)).fetchall()
+        lifecycle = self.collaboration.goal_lifecycle
+        if not pending or not lifecycle.scope_is_open(goal_id):
+            return False
+        checkpoint = self.journal.checkpoint(turn.id)
+        if checkpoint["phase"] != "model" or checkpoint["pending"] or self.db.execute("""
+            SELECT 1 FROM events WHERE turn_id = ? AND type = 'turn.delivery_yielded'
+            UNION ALL
+            SELECT 1 FROM execution_receipts WHERE turn_id = ? AND state = 'started'
+            LIMIT 1
+        """, (turn.id, turn.id)).fetchone():
+            return False
+        goal = self.db.execute("SELECT source_message_id FROM team_goals WHERE id = ?", (goal_id,)).fetchone()
+        scope = set(lifecycle._scope_objects(actor.team_id, goal_id, goal["source_message_id"])["message_ids"])
+        for item in pending:
+            if item["message_id"] not in scope:
+                continue
+            try:
+                applicable = self._priority_applies(actor, item)
+            except TeamNotFound:
+                continue
+            if not applicable:
+                continue
+            self.db.execute("UPDATE turns SET status = 'yielded' WHERE id = ? AND status = 'running'", (turn.id,))
+            self._event(turn.id, "turn.delivery_yielded", event_id=item["event_id"], purpose=item["purpose"],
+                        queued_through=pending[-1]["event_id"], generation=turn.generation)
+            return True
+        return False
+
+    def _priority_applies(self, actor, delivery):
+        purpose = delivery["purpose"]
+        if delivery["kind"] == "supplement" or purpose in {
+            "message.correction", "clarification.resume", "clarification.correction",
+        }:
+            return True
+        delegation = self.collaboration.delegation
+        context = delegation.execution_context(delivery["message_id"], actor) or {}
+        if purpose == "task.submitted":
+            return bool(context.get("review_request"))
+        if purpose == "task.approved":
+            return bool(context.get("goal_close_ready"))
+        task = context.get("task")
+        if not task or task["terms"]["owner_id"] != actor.id:
+            return False
+        current = delegation._visible_task(actor.team_id, actor, task["id"])
+        return current["revision"] == task["revision"] and delegation.results.status(current) in READY_TO_SUBMIT
+
+    def _publication_followup(self, actor, delivery_task, result):
+        if actor is None or not delivery_task or not result.get("ok") or delivery_task["terms"]["owner_id"] != actor.id:
+            return result
+        delegation = self.collaboration.delegation
+        try:
+            task = delegation._visible_task(actor.team_id, actor, delivery_task["id"])
+        except TeamNotFound:
+            return result
+        if (task["revision"] != delivery_task["revision"] or task["terms"]["owner_id"] != actor.id
+                or not self.collaboration.goal_lifecycle.scope_is_open(task["goal_id"])
+                or delegation.results.status(task) not in READY_TO_SUBMIT):
+            return result
+        members = self.collaboration.teams.get(actor.team_id)["members"]
+        reviewer = next(m for m in members if m["member_id"] == task["terms"]["reviewer_id"])
+        version = result["result"]
+        if reviewer["session_id"] not in version["reader_session_ids"]:
+            return result
+        return {**result, "next_action": {
+            "tool": "submit_result", "task_id": task["id"], "expected_revision": task["revision"],
+            "version_id": version["version_id"],
+            "guidance": "When the candidate passes its representative check, submit the required version IDs and evidence. "
+                        "Record open issues and leave the acceptance decision to the designated reviewer.",
+        }}
+
     def _check_assistant_job(self, role, turn_id):
         self.workspace_tools.actor(role)
         job = self.db.execute("SELECT input FROM assistant_jobs WHERE turn_id = ?", (turn_id,)).fetchone()
@@ -396,6 +482,9 @@ class Runtime:
             history_scope = None
             goal_id = None
             proposal = None
+            delivery_task = None
+            can_yield = False
+            member = None
             if scheduled:
                 instructions += DELIVERY_PROMPT
                 delivery = self.db.execute("""
@@ -407,7 +496,11 @@ class Runtime:
                 message = payload["message"]
                 if delivery["purpose"] == "delegation.proposal":
                     proposal = payload.get("proposal")
+                if delivery["purpose"] in OWNER_DELIVERIES:
+                    delivery_task = payload.get("task")
+                can_yield = delivery["purpose"] == "message" and message["kind"] in {"chat", "progress"}
                 actor = self.workspace_tools.actor(role)
+                member = self.collaboration.auth.member(role)
                 goal_id, history_scope = self.collaboration.goal_scope_for_message(actor.team_id, message["id"])
                 if fork_message_id is not None:
                     history_scope = {fork_message_id, message["id"]}
@@ -458,6 +551,8 @@ class Runtime:
                         if name == "close_goal" and self.journal.confirming_goal(turn.id):
                             await self._confirm_goal_close(role, turn)
                             return
+                        if name == "publish_artifact":
+                            result = self._publication_followup(member, delivery_task, result)
                         current.append({"role": "tool", "tool_call_id": call["id"],
                                         "content": json.dumps(result, ensure_ascii=False)})
                         proposal_confirmed |= _confirmation_yields(proposal, name, result)
@@ -488,6 +583,8 @@ class Runtime:
                     tools.extend(self.fork_messages.tools_for(role))
                 model_identity = getattr(self.model, "identity", {"mode": "injected", "endpoint": None, "model": None})
                 with self.db:
+                    if can_yield and member is not None and self._yield_to_pending_delivery(turn, member, goal_id):
+                        return
                     for new_text in self.journal.drain_inputs(turn.id, turn.generation):
                         self._event(turn.id, "turn.input_applied", text=new_text)
                         current.append({"role": "user", "content": new_text})

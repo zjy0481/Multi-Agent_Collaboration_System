@@ -768,7 +768,7 @@ class GoalLifecycle:
                 JOIN scheduled_turns s USING(event_id, session_id, purpose)
                 JOIN turns t ON t.id = s.turn_id
                 WHERE d.message_id IN ({placeholders})
-                  AND t.status IN ('running', 'recoverable', 'waiting_human', 'waiting_approval')
+                  AND t.status IN ('running', 'recoverable', 'yielded', 'waiting_human', 'waiting_approval')
             """, tuple(scope["message_ids"])).fetchall()
             for delivery in scheduled:
                 if delivery["turn_id"] == confirming_turn_id:
