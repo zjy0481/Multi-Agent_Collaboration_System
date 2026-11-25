@@ -14,7 +14,7 @@ from .artifacts import ArtifactError, ArtifactNotFound, ArtifactStore
 from .sandbox import SandboxError
 from .validation_feedback import validation_feedback
 from .search import SearchError
-from .source_fetch import SourceHTTPError, fetch_public_source
+from .source_fetch import SourceHTTPError, SourceReadError, fetch_public_source
 
 
 class WorkspaceNotFound(Exception):
@@ -327,13 +327,15 @@ class WorkspaceService:
                 )}
             return {"ok": False, "error": str(exc)}
         except SourceHTTPError as exc:
-            result = {"ok": False, "error": str(exc), "status": exc.status_code}
-            if exc.status_code in {202, 401, 403, 404, 406, 410}:
+            result = {"ok": False, "error": str(exc), "status": exc.status_code, "code": "source_http_status"}
+            if exc.status_code in {202, 401, 403, 404, 406, 410, 429}:
                 result["next_action"] = (
                     "Try a different accessible public source with read_source. Use a search excerpt as a lead "
                     "and mark any claim you cannot verify."
                 )
             return result
+        except SourceReadError as exc:
+            return {"ok": False, "error": str(exc), "code": exc.code, "next_action": exc.next_action}
         except (WorkspaceNotFound, ArtifactError, SearchError, SandboxError) as exc:
             return {"ok": False, "error": str(exc)}
 
@@ -406,10 +408,14 @@ class WorkspaceService:
             else:
                 url = args.url
                 if url not in [item['url'] for item in search['results']]:
-                    raise WorkspaceNotFound('URL not found in this search record')
+                    raise SourceReadError(
+                        'source_result_mismatch', 'URL not found in this search record',
+                        'Use result_id from get_search_result for this search_id, or search for the intended URL.',
+                    )
             result = await asyncio.to_thread(fetch_public_source, url)
             self.actor(actor.session_id)
             result.update(source_id=uuid4().hex, search_id=args.search_id,
+                          evidence_kind='source_text',
                           retrieved_at=datetime.now(timezone.utc).isoformat())
             with self.db:
                 self.db.execute('INSERT INTO workspace_sources VALUES (?, ?, ?, ?, ?)',
@@ -419,7 +425,9 @@ class WorkspaceService:
                               (args.source_id, actor.team_id, actor.session_id, actor.scope_id)).fetchone()
         if row is None:
             raise WorkspaceNotFound('Source record not found')
-        return _text_window(json.loads(row['data']), "text", args)
+        source = json.loads(row['data'])
+        source.setdefault('evidence_kind', 'source_text')
+        return _text_window(source, "text", args)
 
     async def _search(self, actor: Actor, query: str, limit: int):
         if self.search is None:
@@ -439,7 +447,8 @@ class WorkspaceService:
                  json.dumps(results, ensure_ascii=False), upstream_status, provider, fallback_reason),
             )
         return {"search_id": search_id, "query": query, "results": [{**item, "result_id": i} for i, item in enumerate(results, 1)],
-                "upstream_status": upstream_status, "provider": provider, "fallback_reason": fallback_reason}
+                "upstream_status": upstream_status, "provider": provider, "fallback_reason": fallback_reason,
+                "evidence_kind": "search_excerpt"}
 
     def _search_record(self, actor: Actor, search_id: str):
         row = self.db.execute(
@@ -451,4 +460,4 @@ class WorkspaceService:
             raise WorkspaceNotFound("Search record not found")
         return {"search_id": search_id, "query": row["query"], "results": [{**item, "result_id": i} for i, item in enumerate(json.loads(row["results"]), 1)],
                 "upstream_status": row["upstream_status"], "provider": row["provider"],
-                "fallback_reason": row["fallback_reason"]}
+                "fallback_reason": row["fallback_reason"], "evidence_kind": "search_excerpt"}
