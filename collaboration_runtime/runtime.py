@@ -368,7 +368,7 @@ class Runtime:
         if not self.journal.advance(turn.id, turn.generation, step, phase, current):
             raise StaleTurn
 
-    def _yield_to_pending_delivery(self, turn, actor, goal_id):
+    def _yield_to_pending_delivery(self, turn, actor, goal_id, *, assignment_owner_only=False):
         """Yield a low-priority turn once, only between model requests."""
         if not goal_id:
             return False
@@ -395,6 +395,8 @@ class Runtime:
         goal = self.db.execute("SELECT source_message_id FROM team_goals WHERE id = ?", (goal_id,)).fetchone()
         scope = set(lifecycle._scope_objects(actor.team_id, goal_id, goal["source_message_id"])["message_ids"])
         for item in pending:
+            if assignment_owner_only and item["purpose"] not in OWNER_DELIVERIES:
+                continue
             if item["message_id"] not in scope:
                 continue
             try:
@@ -525,6 +527,7 @@ class Runtime:
             delivery_task = None
             can_yield = False
             member = None
+            assignment_owner_yield = False
             if scheduled:
                 instructions += DELIVERY_PROMPT
                 delivery = self.db.execute("""
@@ -538,7 +541,8 @@ class Runtime:
                     proposal = payload.get("proposal")
                 if delivery["purpose"] in OWNER_DELIVERIES:
                     delivery_task = payload.get("task")
-                can_yield = delivery["purpose"] == "message" and message["kind"] in {"chat", "progress"}
+                assignment_owner_yield = delivery["purpose"] == "message" and message["kind"] == "assignment"
+                can_yield = delivery["purpose"] == "message" and message["kind"] in {"chat", "progress", "assignment"}
                 actor = self.workspace_tools.actor(role)
                 member = self.collaboration.auth.member(role)
                 goal_id, history_scope = self.collaboration.goal_scope_for_message(actor.team_id, message["id"])
@@ -546,6 +550,12 @@ class Runtime:
                     history_scope = {fork_message_id, message["id"]}
                 elif history_scope is None and (message["kind"] == "assignment" or delivery["purpose"] == "goal.terminal"):
                     history_scope = {message["id"]}
+            if assignment_owner_yield and self.db.execute(
+                "SELECT 1 FROM events WHERE turn_id = ? AND type = 'turn.delivery_yielded'", (turn.id,),
+            ).fetchone():
+                instructions += ("\n\nYou resumed after your own formal task was handled. "
+                                 "Check its current state and results before continuing; do not repeat "
+                                 "delegation or rebuild an existing candidate.")
             version_ids = check_scope()
             trimmed_history = False
             if is_fork:
@@ -624,7 +634,9 @@ class Runtime:
                     tools.extend(self.fork_messages.tools_for(role))
                 model_identity = getattr(self.model, "identity", {"mode": "injected", "endpoint": None, "model": None})
                 with self.db:
-                    if can_yield and member is not None and self._yield_to_pending_delivery(turn, member, goal_id):
+                    if can_yield and member is not None and self._yield_to_pending_delivery(
+                        turn, member, goal_id, assignment_owner_only=assignment_owner_yield,
+                    ):
                         return
                     for new_text in self.journal.drain_inputs(turn.id, turn.generation):
                         self._event(turn.id, "turn.input_applied", text=new_text)

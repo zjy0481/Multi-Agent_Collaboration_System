@@ -91,8 +91,12 @@ class DeliveryScheduler:
             self.db.execute('BEGIN IMMEDIATE')
             candidates = self.db.execute('''
                 WITH waiting AS (
-                    SELECT t.role, json_extract(e.payload, '$.queued_through') AS queued_through
+                    SELECT t.role, json_extract(e.payload, '$.queued_through') AS queued_through,
+                           json_extract(e.payload, '$.event_id') AS target_event, ym.kind AS yielded_kind
                     FROM turns t JOIN events e ON e.turn_id = t.id
+                    JOIN scheduled_turns ys ON ys.turn_id = t.id
+                    JOIN message_deliveries yd USING (event_id, session_id, purpose)
+                    JOIN team_messages ym ON ym.id = yd.message_id
                     WHERE t.status = 'yielded' AND e.type = 'turn.delivery_yielded'
                 )
                 SELECT d.event_id, d.message_id, d.session_id, d.purpose, d.status,
@@ -111,6 +115,8 @@ class DeliveryScheduler:
                       AND (s.turn_id IS NULL OR live.id != s.turn_id)
                   )
                 ORDER BY CASE WHEN t.status = 'recoverable' THEN 0
+                              WHEN w.yielded_kind = 'assignment' AND s.turn_id IS NULL AND d.event_id = w.target_event THEN 1
+                              WHEN t.status = 'yielded' THEN 4
                               WHEN m.kind = 'assignment' THEN 1
                               WHEN s.turn_id IS NULL AND d.event_id > w.queued_through
                                AND m.kind <> 'supplement'
@@ -119,7 +125,6 @@ class DeliveryScheduler:
                                   'task.submitted', 'task.approved', 'message.correction',
                                   'clarification.resume', 'clarification.correction') THEN 2
                               WHEN d.purpose IN ('task.assigned', 'task.updated', 'task.ready', 'task.returned') THEN 3
-                              WHEN t.status = 'yielded' THEN 4
                               ELSE 5 END, d.event_id
             ''').fetchall()
             for row in candidates:
