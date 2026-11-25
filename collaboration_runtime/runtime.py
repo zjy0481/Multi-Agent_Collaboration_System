@@ -759,8 +759,10 @@ class Runtime:
             raise UnknownToolOutcome(f"Check the outcome of {name} ({call_id}) before retrying this work")
 
         pending = self.journal.checkpoint(turn.id)["pending"]
+        # Group supplements enter at the next model boundary. Direct steering can discard an unstarted tool.
+        direct_steer = any(isinstance(entry, str) for entry in pending)
         skip_reason = ("Work is waiting for human input." if pause else
-                       "Input changed. Decide again before using this tool." if pending and receipt is None else None)
+                       "Input changed. Decide again before using this tool." if direct_steer and receipt is None else None)
         if workspace_id is not None:
             self.workspace_tools.actor(role)
         with self.db:

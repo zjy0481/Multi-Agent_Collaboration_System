@@ -118,12 +118,16 @@ def test_inflight_tool_receipt_preserved_before_active_input(tmp_path):
             assert self.release.wait(8)
             return {'exit_code':0, 'stdout':'once', 'stderr':''}
     class Model:
-        def __init__(self): self.calls = 0
+        def __init__(self):
+            self.calls = 0
+            self.followup = None
+
         async def complete(self, messages, tools):
             self.calls += 1
             if self.calls == 1:
                 return {'role':'assistant','content':None,'tool_calls':[
                     call('run_command','one',{'command':'first'}), call('run_command','two',{'command':'second'})]}
+            self.followup = messages[-3:]
             return {'role':'assistant','content':'done'}
     sandbox, model = BlockingSandbox(), Model()
     with TestClient(create_app(model=model, sandbox=sandbox, state_dir=tmp_path, bootstrap=bootstrap,
@@ -143,11 +147,13 @@ def test_inflight_tool_receipt_preserved_before_active_input(tmp_path):
             rows = db.execute("SELECT call_id, result FROM execution_receipts WHERE call_id IN ('one','two') ORDER BY position").fetchall()
             return [dict(r) for r in rows] if len(rows)==2 and all(r['result'] for r in rows) else None
         rows = wait_until(lambda: client.portal.call(results))
-        assert sandbox.calls == 1
-        assert json.loads(rows[0]['result'])['ok']
-        assert not json.loads(rows[1]['result'])['ok']
+        assert sandbox.calls == 2
+        assert all(json.loads(row['result'])['ok'] for row in rows)
         wait_until(lambda: client.portal.call(lambda: client.app.state.runtime.db.execute(
             "SELECT count(*) FROM events WHERE type='turn.input_applied' AND payload LIKE ?", ('%'+receipt['message_id']+'%',)).fetchone()[0]) == 1)
+        wait_until(lambda: model.followup)
+        assert [message['tool_call_id'] for message in model.followup[:2]] == ['one', 'two']
+        assert model.followup[2] == {'role': 'user', 'content': 'change'}
 
 
 def test_structured_pending_survives_checkpoint_reopen(tmp_path):
