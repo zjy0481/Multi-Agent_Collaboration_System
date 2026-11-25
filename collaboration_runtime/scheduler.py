@@ -28,16 +28,28 @@ def _delivery_guidance(payload, actor_id=None):
         return {'correction': ('Apply the verified change to the referenced work, then yield for the pending task. '
                                'Use the existing candidate and record any effect on its review.')}
     if purpose == 'task.submitted':
-        return {'review': ('Use the task revision and submitted versions in this delivery. Review those versions against '
-                           'the acceptance criteria and traceable evidence. Report a specific gap or decision for each '
-                           'criterion. Read only the needed passages when the evidence locations are known.')}
+        request = payload.get('review_request')
+        if not request:
+            return {'notice': ('This is a submission update. Let the designated reviewer decide. Continue only '
+                               'independent work that needs this update.')}
+        submission = request['submission']
+        return {'review': {
+            'tool': 'review_result',
+            'arguments': {'task_id': submission['task_id'], 'expected_revision': submission['task_revision'],
+                          'submission_id': submission['id']},
+            'guidance': ('Review the exact versions and check each numbered criterion once. Read only the passages '
+                         'needed for the decision. Record one evidence-backed finding per criterion. Approve when all '
+                         'pass. For a return, give the specific gap, expected correction and recheck items. Make this '
+                         'first decision promptly, before optional research or rewriting the candidate.'),
+        }}
     if purpose == 'message' and payload.get('message', {}).get('kind') == 'assignment':
         return {'assignment': ('Register the goal and propose the smallest complete outcome a reviewer can check. '
                                'Clarify blockers and start independent work before expanding the plan. '
                                'Name one primary deliverable, its owner, reviewer and readers. '
-                               'Let that owner publish the primary candidate. Prepare independent checks against '
-                               'the same candidate. If ownership must change, register the change before work shifts. '
-                               'Use output_grants and dependency_ids for work that consumes another task output. '
+                               'Let that owner publish and submit the primary candidate while others prepare checks. '
+                               'Pin exact input_version_ids for checks of a published draft. For work that needs an '
+                               'approved output, use dependency_ids and set output_grants on the producing task. '
+                               'If ownership must change, register the change before work shifts. '
                                'End this turn when waiting for confirmations.')}
     if purpose == 'delegation.proposal':
         if action := payload.get('proposal_action'):
@@ -50,7 +62,9 @@ def _delivery_guidance(payload, actor_id=None):
         task = payload.get('task', {})
         if actor_id is not None and task.get('terms', {}).get('owner_id') == actor_id:
             return {'delivery': ('Choose a representative acceptance check for the smallest reviewable version. '
-                                 'Report missing inputs and continue independent work. When that check passes, '
+                                 'Report a missing input to its dispatcher once and continue independent work. '
+                                 'For research, draft from available evidence and search only for specific gaps. '
+                                 'When the representative check passes, '
                                  'publish the exact result and evidence to the required readers and call submit_result '
                                  'for this task and revision before running optional checks or polishing. '
                                  'Disclose any remaining acceptance gaps and yield to the reviewer.')}
@@ -77,8 +91,12 @@ class DeliveryScheduler:
             self.db.execute('BEGIN IMMEDIATE')
             candidates = self.db.execute('''
                 WITH waiting AS (
-                    SELECT t.role, json_extract(e.payload, '$.queued_through') AS queued_through
+                    SELECT t.role, json_extract(e.payload, '$.queued_through') AS queued_through,
+                           json_extract(e.payload, '$.event_id') AS target_event, ym.kind AS yielded_kind
                     FROM turns t JOIN events e ON e.turn_id = t.id
+                    JOIN scheduled_turns ys ON ys.turn_id = t.id
+                    JOIN message_deliveries yd USING (event_id, session_id, purpose)
+                    JOIN team_messages ym ON ym.id = yd.message_id
                     WHERE t.status = 'yielded' AND e.type = 'turn.delivery_yielded'
                 )
                 SELECT d.event_id, d.message_id, d.session_id, d.purpose, d.status,
@@ -97,6 +115,8 @@ class DeliveryScheduler:
                       AND (s.turn_id IS NULL OR live.id != s.turn_id)
                   )
                 ORDER BY CASE WHEN t.status = 'recoverable' THEN 0
+                              WHEN w.yielded_kind = 'assignment' AND s.turn_id IS NULL AND d.event_id = w.target_event THEN 1
+                              WHEN t.status = 'yielded' THEN 4
                               WHEN m.kind = 'assignment' THEN 1
                               WHEN s.turn_id IS NULL AND d.event_id > w.queued_through
                                AND m.kind <> 'supplement'
@@ -105,7 +125,6 @@ class DeliveryScheduler:
                                   'task.submitted', 'task.approved', 'message.correction',
                                   'clarification.resume', 'clarification.correction') THEN 2
                               WHEN d.purpose IN ('task.assigned', 'task.updated', 'task.ready', 'task.returned') THEN 3
-                              WHEN t.status = 'yielded' THEN 4
                               ELSE 5 END, d.event_id
             ''').fetchall()
             for row in candidates:

@@ -24,7 +24,13 @@ def test_stage_guidance_is_scoped():
     for purpose in ('task.assigned', 'task.ready', 'task.updated', 'task.returned'):
         assert 'submit_result' in _delivery_guidance(payload(purpose, task=task), 'owner')['delivery']
         assert _delivery_guidance(payload(purpose, task=task), 'reviewer') is None
-    assert 'evidence' in _delivery_guidance(payload('task.submitted'))['review']
+    assert 'notice' in _delivery_guidance(payload('task.submitted'), 'observer')
+    submitted = payload('task.submitted', review_request={
+        'submission': {'id': 's', 'task_id': 't', 'task_revision': 1},
+    })
+    review = _delivery_guidance(submitted, 'reviewer')['review']
+    assert 'evidence' in review['guidance']
+    assert review['arguments'] == {'task_id': 't', 'expected_revision': 1, 'submission_id': 's'}
     assert _delivery_guidance(payload('task.approved'), 'lead') is None
     assert 'close_goal' in _delivery_guidance(payload('task.approved', goal_close_ready=True), 'lead')['closure']
     assert 'assign_task' in _delivery_guidance(payload('delegation.proposal', proposal_action='assign_task'))['proposal']
