@@ -11,6 +11,8 @@ from .git_executor import GitActionError, GitExecutor, _SHA, _SLUG
 
 
 _REPOSITORY = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/[A-Za-z0-9_.-]{1,100}\Z")
+TASK_BRANCH_PREFIX = "refs/heads/macs/task-"
+_TASK_BRANCH = re.compile(re.escape(TASK_BRANCH_PREFIX) + r"[0-9a-f]{32}\Z")
 _AUTH_REFUSAL = re.compile(
     rb"fatal: (?:"
     rb"Authentication failed for 'https://github\.com/[^']+'|"
@@ -29,21 +31,23 @@ class GitHubExecutor(GitExecutor):
     def from_config(cls, state_dir: Path, raw: str):
         try:
             config = json.loads(raw)
-            if not isinstance(config, dict) or config.keys() != {"alias", "repository", "ref"}:
+            if not isinstance(config, dict) or config.keys() not in ({"alias", "repository"}, {"alias", "repository", "ref"}):
                 raise ValueError
-            alias, repository, ref = (config[key] for key in ("alias", "repository", "ref"))
-            if not all(isinstance(value, str) for value in (alias, repository, ref)):
+            alias, repository = (config[key] for key in ("alias", "repository"))
+            ref = config.get("ref")
+            if not all(isinstance(value, str) for value in (alias, repository)):
                 raise ValueError
             if not _SLUG.fullmatch(alias) or not _REPOSITORY.fullmatch(repository):
                 raise ValueError
             name = repository.split("/")[1]
             if name in {".", ".."} or name.lower().endswith(".git"):
                 raise ValueError
-            cls._ref(ref)
+            if "ref" in config:
+                cls._ref(ref)
         except (ValueError, GitActionError):
-            raise ValueError("Invalid COLLABORATION_GITHUB_TARGET: expected alias, owner/repository and full branch ref") from None
+            raise ValueError("Invalid COLLABORATION_GITHUB_TARGET: expected alias, owner/repository and optional full branch ref") from None
         executor = cls(state_dir, alias, repository, ref)
-        if executor._git(["check-ref-format", ref]).returncode != 0:
+        if ref is not None and executor._git(["check-ref-format", ref]).returncode != 0:
             raise ValueError("Invalid branch ref in COLLABORATION_GITHUB_TARGET")
         return executor
 
@@ -52,8 +56,9 @@ class GitHubExecutor(GitExecutor):
         self.alias = alias
         self.repository = repository
         self.ref = ref
+        self.task_branch_repository = alias if ref is None else None
         self.url = f"https://github.com/{repository}.git"
-        self.identity = hashlib.sha256(f"{self.url.lower()}\0{ref}".encode()).hexdigest()
+        self.identity = hashlib.sha256(f"{self.url.lower()}\0{ref or TASK_BRANCH_PREFIX}".encode()).hexdigest()
 
     def target_identity(self, repository):
         if repository != self.alias:
@@ -67,8 +72,11 @@ class GitHubExecutor(GitExecutor):
 
     def _target(self, repository, ref):
         self.target_identity(repository)
-        if ref != self.ref:
+        self._ref(ref)
+        if self.ref is not None and ref != self.ref:
             raise GitActionError("GitHub branch ref not configured")
+        if self.ref is None and not _TASK_BRANCH.fullmatch(ref):
+            raise GitActionError("Expected a platform-managed task branch")
         return self.url
 
     def _remote_git(self, args, gitdir=()):
@@ -99,7 +107,8 @@ class GitHubExecutor(GitExecutor):
         ], env=env, cwd=self.state_dir)
 
     def _read_ref(self, target, ref):
-        result = self._remote_git(["ls-remote", "--exit-code", "--refs", "--", target, ref])
+        options = [] if ref == "HEAD" else ["--refs"]
+        result = self._remote_git(["ls-remote", "--exit-code", *options, "--", target, ref])
         if result.returncode == 2 and not result.stdout:
             return ""
         if result.returncode == 0:
@@ -112,13 +121,38 @@ class GitHubExecutor(GitExecutor):
                     return sha
         raise GitActionError("Cannot verify the GitHub branch ref")
 
-    def _prepare_parent(self, gitdir, target, ref):
-        parent = self._read_ref(target, ref)
+    def _fetch_parent(self, gitdir, target, parent):
         if parent:
             fetch = self._remote_git(["fetch", "--no-tags", "--no-write-fetch-head",
                                       "--no-recurse-submodules", "--", target, parent], gitdir)
             if fetch.returncode:
                 raise GitActionError("Cannot read GitHub branch history")
+
+    def prepare_branch(self, session_id, repository, ref):
+        target = self._target(repository, ref)
+        local = self._local(session_id, repository, ref)
+        return self._prepare_parent(["--git-dir", str(local)], target, ref)
+
+    def _prepare_parent(self, gitdir, target, ref):
+        if self.task_branch_repository is not None:
+            existing = self._git([*gitdir, "rev-parse", "--verify", "--quiet", ref])
+            if existing.returncode not in (0, 1):
+                raise GitActionError("Cannot read the local task branch")
+            if existing.returncode == 0:
+                head = existing.stdout.decode("ascii", "replace").strip()
+                if not _SHA.fullmatch(head):
+                    raise GitActionError("Invalid local task branch SHA")
+                return head
+
+        parent = self._read_ref(target, ref)
+        if not parent and self.task_branch_repository is not None:
+            parent = self._read_ref(target, "HEAD")
+        self._fetch_parent(gitdir, target, parent)
+        if self.task_branch_repository is not None:
+            if self._git([*gitdir, "symbolic-ref", "HEAD", ref]).returncode:
+                raise GitActionError("Cannot prepare the local task branch")
+            if parent:
+                self._update_local_branch(gitdir, ref, parent, None)
         return parent
 
     def _push_status(self, gitdir, target, ref, sha):

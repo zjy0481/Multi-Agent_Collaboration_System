@@ -33,3 +33,15 @@ Windows 宿主上，T011 的 5 项回归通过，覆盖拒绝、参数不匹配�
 - 目标 `zjy0481/MACS_testing` 的 `refs/heads/test/t016-workbench-20261125` 在批准前不存在。GitHub REST 独立确认该 ref 指向获准提交。 [实测提交](https://github.com/zjy0481/MACS_testing/commit/6361abf87fbfc10ae3d147577dc556acb4750068)
 - 真实 GitHub 实测覆盖首次创建分支。后续快进、拒绝审批、参数不匹配和远端 SHA 不符由本地可重复测试覆盖。实测后的修订区分了明确拒绝和推送结果未知，两种状态以及重启后的只读核对均已通过本地回归。 [GitHub 交付测试](../../tests/test_github_delivery.py)
 - 原始浏览器批准、动作和远端证据位于本机 `.tmp/t016-workbench-github-20261125/`。工作台和验收浏览器均已退出。
+
+## 自动任务分支复验
+
+2026 年 11 月 25 日，使用正式入口启动独立工作台，GitHub 配置只指定仓库和别名。固定测试模型通过三个关联回合各创建一个测试文件。用户在工作台逐次批准，平台自动创建 `refs/heads/macs/task-87d8f74bdeb04e81a525cfc92fd15e0b`，随后两次更新同一分支。三个动作均为 `succeeded`，每次获准 SHA 都与平台读回和独立 GitHub REST 核对结果一致。
+
+| 顺序 | 获准及实读提交 | 操作 |
+| --- | --- | --- |
+| 1 | [`c13577c`](https://github.com/zjy0481/MACS_testing/commit/c13577cd42da1346ef04e4b35039d138bd30b562) | 创建远端分支 |
+| 2 | [`5e32474`](https://github.com/zjy0481/MACS_testing/commit/5e324743e58556a7a762f77af4da5bf5c0d123c8) | 更新同一分支 |
+| 3 | [`fd2186d`](https://github.com/zjy0481/MACS_testing/commit/fd2186d4e7416e054dccf6a02e686f3fcef0ec7e) | 再次更新同一分支 |
+
+测试分支从 `main` 的 `2b3aae8` 创建，之后增加三个连续提交。原始审批与远端核对证据位于本机 `.tmp/task-branch-three-live-20261125/`。 [GitHub 分支对比](https://github.com/zjy0481/MACS_testing/compare/2b3aae80c22ea5c10570f5ecefbec843f08a9965...fd2186d4e7416e054dccf6a02e686f3fcef0ec7e)

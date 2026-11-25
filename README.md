@@ -52,7 +52,7 @@ max_steps = 20
 
 保持该终端运行。首次启动会在状态目录创建 `operator-token`，用于网页登录和本机管理 API。默认状态目录为 `.tmp/runtime`。如果启动时设置了 `COLLABORATION_STATE_DIR`，请从所选目录读取令牌。
 
-需要通过工作台批准 GitHub 推送时，在启动终端配置 `COLLABORATION_GITHUB_TARGET`，并用同一个命令启动。 [配置与审批说明](docs/environment-setup.md#github-推送)
+需要通过工作台发布 GitHub 任务分支时，在启动终端用 `COLLABORATION_GITHUB_TARGET` 配置目标仓库，再用同一个命令启动。Agent 自动使用任务分支，每次推送由用户在工作台批准。 [配置与审批说明](docs/environment-setup.md#github-推送)
 
 ## 使用教程
 

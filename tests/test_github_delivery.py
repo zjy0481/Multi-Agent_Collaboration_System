@@ -11,8 +11,9 @@ from fastapi.testclient import TestClient
 from collaboration_runtime.api import create_app
 from collaboration_runtime.git_executor import GitActionError
 from test_collaboration import OPERATOR, auth, bootstrap, send, setup_team
+from test_delegation import action as proposal_action, confirm_all, context, create, ok, terms
 from test_git_approvals import FileSandbox, GitModel, action, approvals, decision_payload, read_ref
-from test_scheduler import wait_until
+from test_scheduler import current_delivery, tool, wait_until
 
 TARGET = {"alias": "demo", "repository": "example/delivery", "ref": "refs/heads/main"}
 URL = "https://github.com/example/delivery.git"
@@ -50,7 +51,10 @@ def github(tmp_path, monkeypatch):
         verb = next(verb for verb in ("ls-remote", "fetch", "push") if verb in args)
         if verb == "push":
             assert "--force" not in args and not args[-1].startswith("+")
-            assert args[-1].endswith(":" + TARGET["ref"])
+            if observations.get("managed"):
+                assert ":refs/heads/macs/task-" in args[-1]
+            else:
+                assert args[-1].endswith(":" + TARGET["ref"])
         calls.append(verb)
         if verb == "push" and isinstance(observations["push_result"], tuple):
             stdout, stderr = observations["push_result"]
@@ -72,9 +76,117 @@ def github(tmp_path, monkeypatch):
     return remote, calls, observations
 
 
-def application(tmp_path, model):
+def application(tmp_path, model, *, schedule=True):
     return create_app(model=model, sandbox=FileSandbox(), state_dir=tmp_path / "state",
-                      bootstrap=bootstrap, operator_token=OPERATOR)
+                      bootstrap=bootstrap, operator_token=OPERATOR, schedule=schedule)
+
+
+class TaskBranchModel:
+    async def complete(self, messages, tools):
+        message = current_delivery(messages)["message"]
+        if message["kind"] == "approval":
+            return {"role": "assistant", "content": "Push decision received"}
+        schemas = {entry["function"]["name"]: entry["function"]["parameters"] for entry in tools}
+        assert "prepare_git_branch" in schemas
+        for name in ("create_git_commit", "request_push"):
+            assert not {"repository", "ref"}.intersection(schemas[name]["properties"])
+        results = {m["tool_call_id"]: json.loads(m["content"]) for m in messages if m["role"] == "tool"}
+        prefix = message["id"]
+        if not message["reply_to"]:
+            if prefix + "-branch" not in results:
+                return tool("prepare_git_branch", prefix + "-branch", {})
+            assert results[prefix + "-branch"]["ok"]
+        if prefix + "-commit" not in results:
+            return tool("create_git_commit", prefix + "-commit", {"paths": ["demo.txt"], "message": message["text"]})
+        commit = results[prefix + "-commit"]
+        assert commit["ok"], commit
+        return tool("request_push", prefix + "-push", {"request_id": prefix, "sha": commit["result"]["sha"]})
+
+
+def test_task_branch_is_created_locally_then_published_and_reused(tmp_path, github, monkeypatch):
+    remote, calls, observations = github
+    observations["managed"] = True
+    monkeypatch.setenv("COLLABORATION_GITHUB_TARGET", json.dumps({"alias": "demo", "repository": "example/delivery"}))
+
+    def git(*args):
+        return subprocess.run(["git", *args], check=True, capture_output=True).stdout.strip().decode()
+
+    seed = tmp_path / "seed"
+    git("init", "-b", "main", str(seed))
+    (seed / "base.txt").write_text("base", encoding="utf-8")
+    git("-C", str(seed), "add", "base.txt")
+    git("-C", str(seed), "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "base")
+    git("-C", str(seed), "push", str(remote), "main")
+    git("--git-dir", str(remote), "symbolic-ref", "HEAD", "refs/heads/main")
+    base_sha = read_ref(remote)
+
+    def branch_tip(ref):
+        return git("--git-dir", str(remote), "for-each-ref", "--format=%(objectname)", ref)
+
+    def pending(client):
+        return wait_until(lambda: next(iter(approvals(client, base)), None))
+
+    def decide(client, approval, decision, expected):
+        endpoint = f"/v1/approvals/{approval['approval_id']}/decision"
+        body = decision_payload(approval, decision, approval["approval_id"])
+        assert client.post(endpoint, json=body, headers=auth(member_token)).status_code == 403
+        assert client.post(endpoint, json=body, headers=auth(OPERATOR)).is_success
+        wait_until(lambda: action(client, base, member_token, approval["action_id"])["status"] == expected)
+
+    with TestClient(application(tmp_path, TaskBranchModel())) as client:
+        base, lead, _, tokens = setup_team(client)
+        member_token = tokens[lead["member_id"]]
+        first_message = send(client, base, OPERATOR, request_id="work", text="first change")
+        first = pending(client)
+        ref = "refs/heads/macs/task-" + first_message["message_id"]
+        assert first["ref"] == ref and first["remote_repository"] == "example/delivery"
+        assert "push" not in calls and not branch_tip(ref)
+        local_repo, = (tmp_path / "state" / "git" / "git-objects").glob("*.git")
+        assert git("--git-dir", str(local_repo), "rev-parse", ref) == first["sha"]
+        assert git("--git-dir", str(local_repo), "rev-parse", ref + "^") == base_sha
+        decide(client, first, "approve", "succeeded")
+        assert branch_tip(ref) == first["sha"]
+
+    with TestClient(application(tmp_path, TaskBranchModel())) as client:
+        send(client, base, OPERATOR, request_id="follow-up", text="second change", reply_to=first_message["message_id"])
+        second = pending(client)
+        assert second["ref"] == ref and branch_tip(ref) == first["sha"]
+        decide(client, second, "approve", "succeeded")
+        assert branch_tip(ref) == second["sha"]
+        assert git("--git-dir", str(remote), "rev-parse", ref + "^") == first["sha"]
+        send(client, base, OPERATOR, request_id="other", text="independent work")
+        other = pending(client)
+        assert other["ref"] != ref
+        decide(client, other, "reject", "rejected")
+        assert not branch_tip(other["ref"])
+        assert calls.count("push") == 2 and read_ref(remote) == base_sha
+
+
+def test_delegated_tasks_derive_branches_from_task_id_across_revisions(tmp_path, github, monkeypatch):
+    monkeypatch.setenv("COLLABORATION_GITHUB_TARGET", json.dumps({"alias": "demo", "repository": "example/delivery"}))
+    with TestClient(application(tmp_path, TaskBranchModel(), schedule=False)) as client:
+        base, lead, others, tokens, goal = context(client)
+        lead_id = lead["member_id"]
+        owner_id, reviewer_id = (member["member_id"] for member in others[:2])
+        draft = terms(owner_id, reviewer_id)
+
+        def register(operation, **fields):
+            proposal = create(client, base, tokens[lead_id], goal, draft, **fields)
+            proposal_id = proposal["proposal_id"]
+            confirm_all(client, proposal_id, tokens)
+            return ok(proposal_action(client, proposal_id, tokens[lead_id], operation))
+
+        initial = register("assign")
+        revised = register("update", task_id=initial["task_id"], base_revision=1)
+        other = register("assign")
+        service = client.app.state.runtime.git_approvals
+        actor = client.portal.call(service.chat.auth.resolve, tokens[owner_id])
+
+        def ref(receipt):
+            return client.portal.call(service._task_target, actor, {"message_id": receipt["notification_message_id"]})["ref"]
+
+        assert ref(initial) == ref(revised) == "refs/heads/macs/task-" + initial["task_id"]
+        assert ref(other) == "refs/heads/macs/task-" + other["task_id"]
 
 
 @pytest.mark.parametrize(

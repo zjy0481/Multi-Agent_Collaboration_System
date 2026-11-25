@@ -23,6 +23,8 @@ _SESSION = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}\Z")
 
 
 class GitExecutor:
+    task_branch_repository: str | None = None
+
     def __init__(self, state_dir: Path, targets_dir: Path | None = None):
         self.state_dir = Path(state_dir).resolve()
         self.targets_dir = Path(targets_dir).resolve() if targets_dir is not None else self.state_dir / 'targets'
@@ -176,7 +178,14 @@ class GitExecutor:
             sha = commit.stdout.decode('ascii', 'replace').strip()
             if commit.returncode or not _SHA.fullmatch(sha):
                 raise GitActionError('Cannot create commit')
+            if self.task_branch_repository is not None:
+                self._update_local_branch(gitdir, ref, sha, parent)
             return sha
+
+    def _update_local_branch(self, gitdir, ref, sha, previous):
+        result = self._git([*gitdir, 'update-ref', ref, sha, previous or '0' * 40])
+        if result.returncode:
+            raise GitActionError('Cannot update the local task branch. Retry if another commit just updated it.')
 
     def _push_status(self, gitdir, target, ref, sha):
         try:

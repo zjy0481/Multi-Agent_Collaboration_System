@@ -184,19 +184,22 @@ git ls-remote --symref https://github.com/zjy0481/MACS_testing.git HEAD
 
 在运行工作台的宿主账户登录 GitHub CLI，确认该账户有目标仓库的推送权限。工作台通过 `gh` 的 Git 凭据助手读取宿主登录凭据。 [GitHub CLI 登录](https://cli.github.com/manual/gh_auth_login) · [凭据助手](https://cli.github.com/manual/gh_auth_setup-git)
 
-在启动工作台的同一个 PowerShell 选择一种 Git 模式。以下配置为 GitHub 模式，`alias` 是提交工具中的仓库别名，`repository` 是 GitHub 的 `owner/repository`，`ref` 是唯一允许的完整分支 ref。
+在启动工作台的同一个 PowerShell 配置 GitHub 仓库。`alias` 是仓库别名，`repository` 是 GitHub 的 `owner/repository`。省略 `ref` 即启用自动任务分支。
 
 ```powershell
 Remove-Item Env:COLLABORATION_GIT_TARGETS_DIR -ErrorAction SilentlyContinue
 $env:COLLABORATION_GITHUB_TARGET = @{
     alias = 'MACS_testing'
     repository = 'zjy0481/MACS_testing'
-    ref = 'refs/heads/test/git-delivery-20261123-001'
 } | ConvertTo-Json -Compress
 .\.venv\Scripts\python.exe -m uvicorn collaboration_runtime.api:app --host 127.0.0.1 --port 8000 --workers 1
 ```
 
-请将示例 ref 换成这一轮获准使用的分支。工作台待审批卡片显示实际 GitHub 仓库、完整 ref 和提交 SHA。批准后由 worker 进行普通推送并读回目标 ref。匹配获准 SHA 时，Git 动作状态为 `succeeded`。认证或分支保护明确拒绝推送时，状态为 `failed`。无法确认时，状态为 `pending_verification`，重启后会重新读取该 ref。切回本地裸仓库模式时，移除 `COLLABORATION_GITHUB_TARGET` 并设置 `COLLABORATION_GIT_TARGETS_DIR`。
+需要 Git 分支时，Agent 可以调用 `prepare_git_branch`，也可以直接用 `create_git_commit` 自动建分支并提交。平台按正式委派任务 ID 生成 `macs/task-<id>`。普通任务按原始消息归属分支，继续原任务时可回复原消息。新建分支使用远端默认分支作为起点。已存在的任务分支沿用自己的提交历史。
+
+创建本地分支、从已配置仓库读取分支信息、在当前任务内创建本地提交和查询推送结果都无需逐次审批。首次推送会在 GitHub 创建远端分支，后续推送会更新同一分支。每次都需要在工作台批准卡片上展示的仓库、完整 ref 和提交 SHA。批准后，平台推送获准提交并读回目标 ref，SHA 匹配时标记为 `succeeded`。明确拒绝时标记为 `failed`，结果未知时标记为 `pending_verification`，重启后重新读取该 ref。
+
+旧有固定目标配置可继续提供完整 `ref`，例如 `refs/heads/test/git-delivery-20261123-001`。使用本地裸仓库模式时，移除 `COLLABORATION_GITHUB_TARGET` 并设置 `COLLABORATION_GIT_TARGETS_DIR`。
 
 ## 启动工作台与真实模型联调
 
