@@ -10,6 +10,7 @@ from pydantic import Field, StringConstraints, ValidationError
 
 from .collaboration import CollaborationForbidden, CollaborationInvalid, Command, ObjectId, RequestId
 from .git_executor import GitActionError
+from .github_executor import TASK_BRANCH_PREFIX
 from .local_auth import OPERATOR_ID, Principal
 from .sandbox import SandboxError
 from .teams import TeamConflict, TeamNotFound
@@ -23,18 +24,24 @@ Digest = Annotated[str, StringConstraints(pattern=r"^[a-f0-9]{64}$")]
 GitPath = Annotated[str, StringConstraints(min_length=1, max_length=240)]
 
 
-class CommitInput(Command):
-    repository: Repository
-    ref: GitRef
+class CommitContent(Command):
     paths: list[GitPath] = Field(min_length=1, max_length=32)
     message: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=1000)]
 
 
-class PushInput(Command):
-    request_id: RequestId
+class CommitInput(CommitContent):
     repository: Repository
     ref: GitRef
+
+
+class PushRequest(Command):
+    request_id: RequestId
     sha: CommitId
+
+
+class PushInput(PushRequest):
+    repository: Repository
+    ref: GitRef
 
 
 class ApprovalInput(PushInput):
@@ -54,6 +61,17 @@ TOOLS = {
                      "configured repository and full refs/heads/ ref. Supply a stable request_id."),
     "get_git_action": (ActionInput, "Read the push or approval status for one of your Git actions."),
 }
+TASK_BRANCH_TOOLS = {
+    "prepare_git_branch": (Command, "When this task requires a separate Git branch or GitHub delivery, prepare its "
+                           "local task branch in the host-configured repository. Reuse the branch on follow-up work. "
+                           "Returns the repository, ref and current SHA. This does not publish anything."),
+    "create_git_commit": (CommitContent, "Commit selected relative paths from the active private workspace to the "
+                          "current task's local Git branch. The platform selects and prepares the branch automatically."),
+    "request_push": (PushRequest, "Request the user's approval to publish a commit created in this work to the "
+                     "current task's GitHub branch. The first approved push creates the remote branch. "
+                     "Supply a stable request_id and the SHA returned by create_git_commit."),
+    "get_git_action": TOOLS["get_git_action"],
+}
 BINDING_FIELDS = ("action", "repository", "ref", "sha", "digest")
 
 
@@ -64,6 +82,8 @@ class GitApprovals:
         self.chat = collaboration
         self.workspace = workspace
         self.executor = executor
+        self.task_repository = executor.task_branch_repository
+        self.tools = TASK_BRANCH_TOOLS if self.task_repository is not None else TOOLS
         self.db.executescript("""
             CREATE TABLE IF NOT EXISTS git_commits (
                 turn_id TEXT NOT NULL REFERENCES scheduled_turns(turn_id),
@@ -98,10 +118,13 @@ class GitApprovals:
             CREATE INDEX IF NOT EXISTS git_actions_status ON git_actions(status);
         """)
 
-    @staticmethod
-    def _view(row):
+    def _view(self, row):
         fields = ("action_id", "approval_id", "member_id", "turn_id", "call_id", "status", *BINDING_FIELDS)
-        return {key: row[key] for key in fields}
+        view = {key: row[key] for key in fields}
+        remote = self.executor.remote_repository(row["repository"], row["target_identity"])
+        if remote is not None:
+            view["remote_repository"] = remote
+        return view
 
     def list_pending(self, team_id, actor):
         self.chat.team(team_id, actor)
@@ -123,11 +146,10 @@ class GitApprovals:
             return []
         return [{"type": "function", "function": {
             "name": name, "description": description, "parameters": schema.model_json_schema(),
-        }} for name, (schema, description) in TOOLS.items() if scheduled or name == "get_git_action"]
+        }} for name, (schema, description) in self.tools.items() if scheduled or name == "get_git_action"]
 
-    @staticmethod
-    def handles(name):
-        return name in TOOLS
+    def handles(self, name):
+        return name in self.tools
 
     def _delivery(self, turn_id):
         return self.db.execute("""
@@ -135,18 +157,56 @@ class GitApprovals:
             WHERE s.turn_id = ?
         """, (turn_id,)).fetchone()
 
+    def _task_target(self, actor, delivery):
+        # A task notification wins over its goal. Ordinary follow-ups use their
+        # source assignment or root message. Git result notices resume the same scope.
+        scope = self.db.execute("""
+            WITH RECURSIVE thread(id, reply_to, seq, depth) AS (
+                SELECT id, reply_to, seq, 0 FROM team_messages WHERE team_id = :team AND id = :message
+                UNION ALL
+                SELECT parent.id, parent.reply_to, parent.seq, thread.depth + 1 FROM thread
+                LEFT JOIN git_actions a ON a.notice_id = thread.id AND a.team_id = :team
+                LEFT JOIN scheduled_turns s ON s.turn_id = a.turn_id
+                LEFT JOIN message_deliveries d USING (event_id, session_id, purpose)
+                JOIN team_messages parent ON parent.id = COALESCE(thread.reply_to, d.message_id)
+                    AND parent.team_id = :team AND parent.seq < thread.seq
+            )
+            SELECT COALESCE(task.id, goal.source_message_id, thread.id) AS scope FROM thread
+            LEFT JOIN delegation_notifications n ON n.message_id = thread.id
+            LEFT JOIN collaboration_events e ON e.seq = n.event_id AND e.type LIKE 'task.%'
+            LEFT JOIN delegation_tasks task ON task.id = e.object_id AND task.team_id = :team
+            LEFT JOIN message_goal_scopes g ON g.message_id = thread.id
+            LEFT JOIN team_goals goal ON goal.id = g.goal_id AND goal.team_id = :team
+            ORDER BY task.id IS NOT NULL DESC, goal.source_message_id IS NOT NULL DESC,
+                     CASE WHEN task.id IS NOT NULL OR goal.source_message_id IS NOT NULL
+                          THEN thread.depth ELSE -thread.depth END
+            LIMIT 1
+        """, {"team": actor.team_id, "message": delivery["message_id"]}).fetchone()
+        if scope is None:
+            raise CollaborationForbidden("No task scope is associated with the current work")
+        return {"repository": self.task_repository, "ref": TASK_BRANCH_PREFIX + scope["scope"]}
+
     async def execute(self, role, turn_id, generation, call_id, name, raw_arguments):
         actor = self.chat.auth.member(role)
         if actor is None:
             return {"ok": False, "error": "Git actions require a formal member"}
         try:
-            args = TOOLS[name][0].model_validate_json(raw_arguments)
+            args = self.tools[name][0].model_validate_json(raw_arguments)
             if name == "get_git_action":
                 result = self.get_action(actor.team_id, actor, args.action_id)
             else:
                 delivery = self._delivery(turn_id)
                 if delivery is None or delivery["session_id"] != role:
                     raise CollaborationForbidden("Git writes require currently scheduled work")
+                if self.task_repository is not None:
+                    binding = self._task_target(actor, delivery)
+                    if name == "prepare_git_branch":
+                        self._require_active_work(turn_id, generation, delivery)
+                        sha = await asyncio.to_thread(self.executor.prepare_branch, role, **binding)
+                        result = {**binding, "sha": sha or None}
+                        return {"ok": True, "result": result}
+                    schema = PushInput if name == "request_push" else CommitInput
+                    args = schema(**args.model_dump(), **binding)
                 if name == "request_push":
                     result = self._request(actor, turn_id, generation, call_id, delivery, args)
                 else:
@@ -158,9 +218,12 @@ class GitApprovals:
                 WorkspaceNotFound, GitActionError) as exc:
             return {"ok": False, "error": str(exc)}
 
-    async def _create_commit(self, actor, turn_id, generation, delivery, args):
+    def _require_active_work(self, turn_id, generation, delivery):
         if delivery["status"] != "running" or not self.runtime.journal.current(turn_id, generation):
             raise CollaborationForbidden("The work is no longer active")
+
+    async def _create_commit(self, actor, turn_id, generation, delivery, args):
+        self._require_active_work(turn_id, generation, delivery)
         workspace = self.workspace.actor(actor.session_id)
         if len(set(args.paths)) != len(args.paths):
             raise CollaborationInvalid("Duplicate commit paths")

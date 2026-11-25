@@ -384,7 +384,7 @@ function renderApprovals() {
   for (const approval of state.approvals) {
     const row = element("div", null, "approval");
     row.append(element("strong", "推送请求"),
-      element("div", `仓库：${safeRepository(approval.repository)}`),
+      element("div", `仓库：${safeRepository(approval.remote_repository ?? approval.repository)}`),
       element("div", `目标 ref：${approval.ref}`),
       element("div", `提交 SHA：${approval.sha}`),
       element("div", `摘要：${approval.digest}`));

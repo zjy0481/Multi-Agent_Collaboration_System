@@ -86,7 +86,7 @@ class UnknownToolOutcome(Exception):
 REPLAYABLE_TOOLS = {
     "ask_human", "get_message", "list_participants", "register_goal", "send_message",
     "list_artifacts", "list_workspace_readers", "read_artifact", "read_file", "get_search_result", "get_source",
-    "get_git_action", "request_push",
+    "get_git_action", "prepare_git_branch", "request_push",
     "fork_session", "send_fork_message", "decide_fork_result",
     "get_goal", "update_goal_acceptance", "close_goal", "activate_goal",
 } | DELEGATION_TOOLS.keys() | ExperienceTools.MEMBER_TOOLS.keys()
