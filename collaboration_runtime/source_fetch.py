@@ -16,6 +16,13 @@ from .pdf_worker import MAX_PDF_BYTES, MAX_TEXT_CHARS
 from .search import SearchError
 
 
+class SourceReadError(SearchError):
+    def __init__(self, code, message, next_action):
+        self.code = code
+        self.next_action = next_action
+        super().__init__(message)
+
+
 class SourceHTTPError(SearchError):
     def __init__(self, status_code):
         self.status_code = status_code
@@ -77,9 +84,19 @@ def fetch_public_source(url):
                     or parts.username is not None or parts.password is not None
                     or parts.port not in (None, 443)):
                 raise SearchError('Source must use public HTTPS on port 443')
-            addresses = {item[4][0] for item in socket.getaddrinfo(parts.hostname, 443, type=socket.SOCK_STREAM)}
+            try:
+                addresses = {item[4][0] for item in socket.getaddrinfo(parts.hostname, 443, type=socket.SOCK_STREAM)}
+            except socket.gaierror:
+                raise SourceReadError(
+                    'source_dns_failed', 'Source DNS lookup failed',
+                    'Choose another public result or ask the operator to check DNS on the runtime host.',
+                ) from None
             if not addresses or any(not ipaddress.ip_address(address).is_global for address in addresses):
-                raise SearchError('Source resolves to a non-public address')
+                raise SourceReadError(
+                    'source_non_public_address', 'Source resolves to a non-public address',
+                    'Choose another public result. If known public sites also fail, ask the operator to check '
+                    'whether host DNS is returning proxy-generated addresses. Search excerpts are not source text.',
+                )
             connection = PinnedHTTPS(parts.hostname, 443, sorted(addresses)[0])
             try:
                 target = parts.path or '/'

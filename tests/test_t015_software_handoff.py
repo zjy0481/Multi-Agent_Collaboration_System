@@ -101,3 +101,34 @@ def test_t2_ready_needs_both_roles_and_scoped_published_report(monkeypatch):
     assert handoff.audit_t2_handoff(app,team,'t2',previous)['dashboard_evidence_ready']
     receipts.pop()
     assert not handoff.audit_t2_handoff(app,team,'t2',previous)['dashboard_evidence_ready']
+
+
+def test_t1_selects_provenance_linked_pair_and_never_mixes(monkeypatch):
+    from types import SimpleNamespace
+    lead = {'version_id': 'lead', 'valid': True, 'readable': True, 'sha256': 'lead-hash'}
+    dev = {'version_id': 'dev', 'valid': True, 'readable': True, 'sha256': 'dev-hash'}
+    db = {'version_id': 'db', 'valid': True, 'readable': True, 'sha256': 'db-hash'}
+    prov = {'version_id': 'provenance', 'valid': True, 'readable': True,
+            'data': {'app_version_id': 'lead', 'app_sha256': 'lead-hash', 'database_sha256': 'db-hash'}}
+    candidates = {'t1-app.zip': [dev, lead], 't1-bookings.sqlite3': [db], 't1-data-provenance.json': [prov]}
+    frozen = {'final_versions': [], 'task_acceptance': {}}
+    terminal = {'outcome': 'cancelled', 'frozen': frozen}
+    monkeypatch.setattr(handoff, '_context', lambda *a: (None, None, terminal, set()))
+    monkeypatch.setattr(handoff, '_artifacts', lambda *a: candidates)
+    monkeypatch.setattr(handoff, '_receipts', lambda *a: [])
+    result = handoff.audit_t1_handoff(SimpleNamespace(), {}, 'assignment')
+    assert (result['app_version_id'], result['database_version_id']) == ('lead', 'db')
+    assert result['provenance_hashes_match'] and result['pair_selection'] == 'diagnostic'
+    assert not result['strict_ready']
+    lead['readable'] = False
+    result = handoff.audit_t1_handoff(SimpleNamespace(), {}, 'assignment')
+    assert result['app_version_id'] is None and result['database_version_id'] is None
+    assert not result['provenance_hashes_match'] and result['pair_selection'] == 'unavailable'
+    lead['readable'] = True
+    second = {'version_id': 'p2', 'valid': True, 'readable': True,
+              'data': {'app_version_id': 'dev', 'app_sha256': 'dev-hash', 'database_sha256': 'db-hash'}}
+    candidates['t1-data-provenance.json'].insert(0, second)
+    frozen['final_versions'] = [{'version_id': 'lead'}, {'version_id': 'db'}]
+    frozen['task_acceptance'] = {'task': {'versions': [{'version_id': 'lead'}, {'version_id': 'db'}]}}
+    result = handoff.audit_t1_handoff(SimpleNamespace(), {}, 'assignment')
+    assert result['app_version_id'] == 'lead' and result['pair_selection'] == 'approved'

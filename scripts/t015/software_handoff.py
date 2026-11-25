@@ -109,10 +109,28 @@ def audit_t1_handoff(app, team, t1_assignment_id):
                 for v in fact.get('versions', [])}
     names = ['t1-app.zip', 't1-bookings.sqlite3', 't1-data-provenance.json']
     candidates = _artifacts(app, team, names)
-    app_item, data_item, provenance = (_choose(candidates[n], final) for n in names)
+    # Select the application and snapshot as a single provenance-linked unit. Candidate
+    # lists are newest first, so stable max preserves the latest equally ranked pair.
+    usable = lambda name: [x for x in candidates[name] if x['valid'] and x['readable']]
+    pairs = []
+    for provenance in usable(names[2]):
+        p = provenance.get('data', {})
+        for app_item in usable(names[0]):
+            if p.get('app_version_id') != app_item['version_id'] or p.get('app_sha256') != app_item['sha256']:
+                continue
+            for data_item in usable(names[1]):
+                if p.get('database_sha256') == data_item['sha256']:
+                    pairs.append((app_item, data_item, provenance))
+    def rank(pair):
+        app_item, data_item, provenance = pair
+        formal = lambda item: item['version_id'] in approved and item['version_id'] in final
+        return (int(formal(app_item) and formal(data_item)),
+                int(formal(app_item)) + int(formal(data_item)),
+                int(provenance['version_id'] in final))
+    selected = max(pairs, key=rank, default=None)
+    app_item, data_item, provenance = selected if selected else (None, None, None)
     p = provenance.get('data', {}) if provenance else {}
-    hashes_match = bool(app_item and data_item and p.get('app_version_id') == app_item['version_id']
-                        and p.get('app_sha256') == app_item['sha256'] and p.get('database_sha256') == data_item['sha256'])
+    hashes_match = selected is not None
     receipts = _receipts(db, scope)
     operations = p.get('operations', [])
     path = p.get('source_database_path')
@@ -132,6 +150,9 @@ def audit_t1_handoff(app, team, t1_assignment_id):
             'database_version_id': data_item['version_id'] if data_item else None,
             'app_approved': bool(app_item and app_item['version_id'] in approved and app_item['version_id'] in final),
             'database_approved': bool(data_item and data_item['version_id'] in approved and data_item['version_id'] in final),
+            'pair_selection': ('approved' if app_item and data_item and app_item['version_id'] in approved
+                               and app_item['version_id'] in final and data_item['version_id'] in approved
+                               and data_item['version_id'] in final else 'diagnostic' if selected else 'unavailable'),
             'terminal_outcome': terminal['outcome'] if terminal else None, 'provenance_hashes_match': hashes_match,
             'provenance': p, 'successful_t1_run_receipts': [{'turn_id': r['turn_id'], 'call_id': r['call_id']} for r in receipts],
             'strict_ready': evidence_ready, 'snapshot_receipts': [{'turn_id': r['turn_id'], 'call_id': r['call_id']} for r in receipt_matches], 'candidates': _public(candidates),

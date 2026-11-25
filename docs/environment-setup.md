@@ -77,6 +77,16 @@ Remove-Item Env:RUN_DOCKER_TESTS
 
 原文读取支持 HTML、纯文本和带文本层的 PDF。PDF 由宿主虚拟环境中随 `requirements.txt` 安装的 pypdf 提取，下载限 5 MB、提取限 5 秒和前 20 页，返回文本最多保留 40,000 字符。扫描件或加密 PDF 会返回提取错误。若来源站拒绝访问，工具保留站点 HTTP 状态并提示选择其他公开原文。 [pypdf 文本提取说明](https://pypdf.readthedocs.io/en/stable/user/extract-text.html)
 
+检索回执的 `evidence_kind` 为 `search_excerpt`。成功读取正文后才生成带 `source_id` 的 `source_text` 记录。如果 `read_source` 返回 `source_result_mismatch`，对照同一 `search_id` 的 `get_search_result`，用该记录的 `result_id` 重试。
+
+如果多个已知公开来源均返回 `source_non_public_address`，在运行时宿主上用相同 Python 环境检查实际 DNS 结果。
+
+```powershell
+python -c "import ipaddress,socket; host='hkust.edu.hk'; print([(ip, ipaddress.ip_address(ip).is_global) for ip in sorted({row[4][0] for row in socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)})])"
+```
+
+如果 DNS 代理返回 `198.18.0.0/15` 等合成地址，为需要读取的公开域名按宿主网络策略启用真实 DNS 解析和可到达的 HTTPS 路由，再重复检索和原文读取。原文读取使用直接且固定到校验地址的 TLS 连接。SearXNG 的代理配置只影响备用检索。验收时确认导出的原文记录包含最终 URL、内容哈希和可核对的文本。
+
 ### 验证 SearXNG 使用的 Windows 代理
 
 先启动本机的代理客户端，确认 `7897` 是可用的 HTTP 代理端口。其他机器使用不同端口时，将本节示例中的 `7897` 替换为实际端口。命令返回 `Proxy CONNECT=200 HTTP=204` 时，说明代理可以建立 HTTPS 隧道并取得响应。
