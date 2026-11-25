@@ -19,6 +19,7 @@ from typing import Annotated
 
 from .artifacts import ArtifactError, ArtifactNotFound
 from .collaboration import CollaborationForbidden, CollaborationInvalid, CollaborationService, GoalInput, MessageInput
+from .delivery_requests import DeliveryRequests, DeliveryRequestInput
 from .delegation import (
     CounterProposalInput, CreateProposalInput, DelegationConflict, DelegationService, ProposalReasonInput,
     ProposalVersionInput,
@@ -186,6 +187,7 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             workspace = WorkspaceService(runtime.db, teams, selected_sandbox, state / "team-artifacts", selected_search)
             delegation = DelegationService(collaboration, workspace)
             collaboration.delegation = delegation
+            collaboration.delivery_requests = DeliveryRequests(collaboration)
             collaboration.delegation_tools = DelegationTools(delegation, auth, workspace)
             runtime.workspace_tools = workspace
             runtime.collaboration = collaboration
@@ -326,6 +328,14 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
     @app.post("/v1/teams/{team_id}/members/{member_id}/credential", dependencies=[Depends(_require_operator)])
     async def issue_member_credential(team_id: str, member_id: str):
         return {"token": app.state.auth.issue(team_id, member_id)}
+
+    @app.get("/v1/teams/{team_id}/delivery-requests")
+    async def list_delivery_requests(team_id: str, actor: Identity):
+        return app.state.collaboration.delivery_requests.list(team_id, actor)
+
+    @app.post("/v1/teams/{team_id}/tasks/{task_id}/delivery-requests", status_code=201)
+    async def create_delivery_request(team_id: str, task_id: str, body: DeliveryRequestInput, actor: Identity):
+        return app.state.collaboration.delivery_requests.create(team_id, actor, task_id, body)
 
     @app.post("/v1/teams/{team_id}/messages", status_code=201)
     async def send_message(team_id: str, body: MessageInput, actor: Identity):

@@ -14,6 +14,9 @@ const state = {
   approvals: [],
   approvalRequests: new Map(),
   approvalFetch: 0,
+  deliveryTasks: [],
+  deliveryDrafts: new Map(),
+  deliveryFetch: 0,
   peer: null,
   reply: null,
   stream: null,
@@ -52,7 +55,9 @@ async function api(url, options = {}) {
       const body = await response.json();
       detail = typeof body.detail === "string" ? body.detail : "";
     } catch (_) {}
-    throw new Error(detail || `请求失败 (${response.status})`);
+    const error = new Error(detail || `请求失败 (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -75,6 +80,7 @@ function showLogin() {
   state.approvalFetch++;
   $("approvals").replaceChildren();
   $("approval-section").hidden = true;
+  resetDeliveries();
   $("messages").replaceChildren();
   $("goals").replaceChildren();
   resetTaskResults();
@@ -116,6 +122,7 @@ async function loadTeams() {
     state.approvalFetch++;
     $("approvals").replaceChildren();
     $("approval-section").hidden = true;
+    resetDeliveries();
     $("questions").replaceChildren();
     return;
   }
@@ -128,6 +135,88 @@ async function loadTeams() {
   select.value = chosen;
   await loadTeam(chosen);
 }
+function resetDeliveries(preserve = false) {
+  state.deliveryTasks = [];
+  if (!preserve) state.deliveryDrafts.clear();
+  state.deliveryFetch++;
+  $("delivery-section").hidden = true;
+  $("delivery-list").replaceChildren();
+}
+async function refreshDeliveries(team, generation) {
+  if (!team || state.actor !== "local-operator") return;
+  const fetchId = ++state.deliveryFetch;
+  try {
+    const result = await api(`/v1/teams/${encodeURIComponent(team)}/delivery-requests`);
+    if (generation !== state.generation || team !== state.team || fetchId !== state.deliveryFetch || state.actor !== "local-operator") return;
+    state.deliveryTasks = result.tasks || [];
+    renderDeliveries();
+  } catch (error) {
+    if (generation === state.generation && team === state.team && fetchId === state.deliveryFetch)
+      notice(`送审状态加载失败：${error.message}`);
+  }
+}
+function renderDeliveries() {
+  const section = $("delivery-section"), list = $("delivery-list");
+  section.hidden = state.actor !== "local-operator";
+  list.replaceChildren();
+  if (section.hidden) return;
+  if (!state.deliveryTasks.length) list.append(element("p", "暂无可显示的任务", "empty"));
+  for (const task of state.deliveryTasks) {
+    const row = element("div", null, "delivery-row");
+    row.append(element("strong", `任务 ${task.id.slice(0, 8)} · 修订 ${task.revision} · ${task.status}`));
+    row.append(element("p", `目标 ${task.goal_id} · 负责人 ${nameOf(task.owner_id)} · 主审 ${nameOf(task.reviewer_id)}`));
+    if (task.request) {
+      const r = task.request;
+      row.append(element("p", `请求 ${r.id}：${r.status}${r.submission_id ? ` · 提交 ${r.submission_id}` : ""}${r.review_id ? ` · 审查 ${r.review_id}` : ""}${r.review_decision ? ` · ${r.review_decision}` : ""}${r.reason ? ` · ${r.reason}` : ""}`));
+    }
+    let draft = state.deliveryDrafts.get(task.id);
+    if (!draft || draft.revision !== task.revision) {
+      draft = {revision: task.revision, paths: "", note: "", pending: null, busy: false};
+      state.deliveryDrafts.set(task.id, draft);
+    }
+    const paths = element("textarea"); paths.rows = 2; paths.placeholder = "相对路径，每行一条（可留空）"; paths.value = draft.paths;
+    paths.setAttribute("aria-label", `任务 ${task.id.slice(0, 8)} 文件路径`);
+    paths.oninput = () => { draft.paths = paths.value; };
+    const note = element("input"); note.placeholder = "补充说明（可留空）"; note.value = draft.note;
+    note.setAttribute("aria-label", `任务 ${task.id.slice(0, 8)} 送审说明`);
+    note.oninput = () => { draft.note = note.value; };
+    const button = element("button", draft.busy ? "正在请求…" : "送审当前稿");
+    button.type = "button";
+    button.disabled = draft.busy || task.goal_status !== "active"
+      || !["ready", "assigned", "returned"].includes(task.status)
+      || ["queued", "running"].includes(task.request?.status);
+    button.onclick = () => submitDelivery(task, draft);
+    row.append(paths, note, button); list.append(row);
+  }
+}
+async function submitDelivery(task, draft) {
+  const team = state.team, generation = state.generation;
+  const body = {expected_revision: task.revision, paths: draft.paths.split(/\r?\n/).map(x => x.trim()).filter(Boolean)};
+  if (draft.note.trim()) body.note = draft.note.trim();
+  const signature = JSON.stringify(body);
+  if (!draft.pending || draft.pending.signature !== signature) draft.pending = {signature, request_id: key()};
+  draft.busy = true; renderDeliveries();
+  try {
+    const result = await api(`/v1/teams/${encodeURIComponent(team)}/tasks/${encodeURIComponent(task.id)}/delivery-requests`, {
+      method: "POST", body: JSON.stringify({...body, request_id: draft.pending.request_id}),
+    });
+    if (generation !== state.generation || team !== state.team) return;
+    const current = state.deliveryTasks.find(item => item.id === task.id && item.revision === task.revision);
+    if (current) current.request = result;
+    state.deliveryFetch++;
+    draft.pending = null;
+    notice("送审请求已接收；请查看任务回执状态。");
+    refreshDeliveries(team, generation);
+  } catch (error) {
+    if (generation !== state.generation || team !== state.team) return;
+    if (error.status === 409 || error.status === 404 || error.status === 422) draft.pending = null;
+    notice(`送审请求未确认：${error.message}；请刷新状态，修订变化后重新填写。`);
+    refreshDeliveries(team, generation);
+  } finally {
+    if (generation === state.generation && team === state.team) { draft.busy = false; renderDeliveries(); }
+  }
+}
+$("delivery-refresh").addEventListener("click", () => refreshDeliveries(state.team, state.generation));
 function setComposerEnabled(enabled) {
   $("composer")
     .querySelectorAll("textarea, select, button")
@@ -156,6 +245,7 @@ async function loadTeam(id, preserve = false) {
   state.stream?.close();
   state.stream = null;
   state.team = id;
+  resetDeliveries(preserve && oldTeam === id);
   state.approvals = [];
   if (!preserve || oldTeam !== id) state.approvalRequests.clear();
   state.approvalFetch++;
@@ -181,7 +271,10 @@ async function loadTeam(id, preserve = false) {
     render();
     setComposerEnabled(true);
     connect(s.cursor, generation);
-    if (state.actor === "local-operator") refreshApprovals(id, generation);
+    if (state.actor === "local-operator") {
+      refreshApprovals(id, generation);
+      refreshDeliveries(id, generation);
+    }
   } catch (e) {
     if (generation === state.generation) {
       $("connection").textContent = "加载失败";
@@ -236,11 +329,19 @@ function connect(cursor, generation) {
   stream.addEventListener("stream.reset", () => {
     if (generation === state.generation) loadTeam(state.team, true);
   });
+  for (const type of ["delivery.requested", "delivery.started", "delivery.finished", "delivery.updated",
+    "goal.completed", "goal.failed", "goal.cancelled", "goal.timed_out"]) {
+    stream.addEventListener(type, () => {
+      if (generation === state.generation && state.actor === "local-operator") refreshDeliveries(state.team, generation);
+    });
+  }
   for (const type of ["task.assigned", "task.updated", "task.submitted", "task.approved", "task.returned", "task.needs_recheck"]) {
     stream.addEventListener(type, (event) => {
       if (generation !== state.generation) return;
+      if (state.actor === "local-operator") refreshDeliveries(state.team, generation);
       try {
         const { task } = JSON.parse(event.data);
+        if (!task) return;
         const index = state.tasks.findIndex((item) => item.id === task.id);
         if (index < 0) state.tasks.push(task);
         else state.tasks[index] = task;

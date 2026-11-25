@@ -24,6 +24,10 @@ DEFAULT_MAX_STEPS = 20
 MAX_TOOL_CALLS_PER_DECISION = 8
 OWNER_DELIVERIES = ("task.assigned", "task.updated", "task.ready", "task.returned")
 READY_TO_SUBMIT = {"assigned", "ready", "returned"}
+CANDIDATE_DELIVERY = "task.delivery_requested"
+CANDIDATE_STEPS = 4
+CANDIDATE_TOOLS = {"get_task", "read_file", "read_artifact", "list_artifacts",
+                   "publish_artifact", "submit_result"}
 
 ROLES = {
     "developer": "You are the developer. Implement and test the requested changes. "
@@ -220,6 +224,19 @@ class Runtime:
         if status != "recoverable" and self.forks is not None:
             self.db.execute("UPDATE assistant_jobs SET status = ? WHERE turn_id = ? AND status = 'running'",
                             (status, turn_id))
+        if status not in {"recoverable", "yielded"} and self.collaboration is not None:
+            request = self.db.execute("""
+                SELECT d.message_id, d.session_id FROM scheduled_turns s
+                JOIN message_deliveries d USING (event_id, session_id, purpose)
+                WHERE s.turn_id = ? AND s.purpose = ?
+            """, (turn_id, CANDIDATE_DELIVERY)).fetchone()
+            if request:
+                member = self.collaboration.auth.member(request["session_id"])
+                if member is not None:
+                    try:
+                        self.collaboration.delivery_requests.finish(request["message_id"], member, reason=error or reply)
+                    except TeamNotFound:
+                        pass
         self._event(turn_id, f"turn.{status}", reply=reply, error=error)
 
     def _finish(self, turn_id: str, status: str, **fields):
@@ -368,7 +385,8 @@ class Runtime:
         if not self.journal.advance(turn.id, turn.generation, step, phase, current):
             raise StaleTurn
 
-    def _yield_to_pending_delivery(self, turn, actor, goal_id, *, assignment_owner_only=False):
+    def _yield_to_pending_delivery(self, turn, actor, goal_id, *, assignment_owner_only=False,
+                                   active_task=None):
         """Yield a low-priority turn once, only between model requests."""
         if not goal_id:
             return False
@@ -376,11 +394,13 @@ class Runtime:
             SELECT d.event_id, d.message_id, d.purpose, m.kind FROM message_deliveries d
             JOIN team_messages m ON m.id = d.message_id
             WHERE d.session_id = ? AND d.status = 'pending'
+              AND (? = 0 OR d.purpose = 'task.delivery_requested')
               AND (m.kind = 'supplement' OR d.purpose IN (
                 'task.assigned', 'task.updated', 'task.ready', 'task.returned',
-                'task.submitted', 'task.approved', 'message.correction', 'clarification.resume', 'clarification.correction'))
+                'task.submitted', 'task.approved', 'message.correction', 'clarification.resume', 'clarification.correction',
+                'task.delivery_requested'))
             ORDER BY d.event_id
-        """, (actor.session_id,)).fetchall()
+        """, (actor.session_id, int(active_task is not None))).fetchall()
         lifecycle = self.collaboration.goal_lifecycle
         if not pending or not lifecycle.scope_is_open(goal_id):
             return False
@@ -394,14 +414,18 @@ class Runtime:
             return False
         goal = self.db.execute("SELECT source_message_id FROM team_goals WHERE id = ?", (goal_id,)).fetchone()
         scope = set(lifecycle._scope_objects(actor.team_id, goal_id, goal["source_message_id"])["message_ids"])
-        for item in pending:
-            if assignment_owner_only and item["purpose"] not in OWNER_DELIVERIES:
-                continue
+        for item in sorted(pending, key=lambda row: row["purpose"] != CANDIDATE_DELIVERY):
             if item["message_id"] not in scope:
                 continue
             try:
-                applicable = self._priority_applies(actor, item)
-            except TeamNotFound:
+                if item["purpose"] == CANDIDATE_DELIVERY:
+                    candidate = self.collaboration.delivery_requests.context(item["message_id"], actor)
+                    applicable = not active_task or candidate["task_id"] == active_task["id"]
+                else:
+                    applicable = (not active_task and
+                                  (not assignment_owner_only or item["purpose"] in OWNER_DELIVERIES)
+                                  and self._priority_applies(actor, item))
+            except (TeamNotFound, CollaborationInvalid):
                 continue
             if not applicable:
                 continue
@@ -500,6 +524,7 @@ class Runtime:
         scheduled = self._scheduled(turn.id)
         is_fork = self.forks is not None and self.forks.exists(role)
         fork_message_id = None
+        candidate = None
 
         def check_scope():
             if is_fork:
@@ -541,6 +566,8 @@ class Runtime:
                     proposal = payload.get("proposal")
                 if delivery["purpose"] in OWNER_DELIVERIES:
                     delivery_task = payload.get("task")
+                if delivery["purpose"] == CANDIDATE_DELIVERY:
+                    candidate = {**payload["candidate_delivery"], "message_id": message["id"]}
                 assignment_owner_yield = delivery["purpose"] == "message" and message["kind"] == "assignment"
                 can_yield = delivery["purpose"] == "message" and message["kind"] in {"chat", "progress", "assignment"}
                 actor = self.workspace_tools.actor(role)
@@ -550,12 +577,28 @@ class Runtime:
                     history_scope = {fork_message_id, message["id"]}
                 elif history_scope is None and (message["kind"] == "assignment" or delivery["purpose"] == "goal.terminal"):
                     history_scope = {message["id"]}
+                if (delivery_task and member and delivery_task["terms"]["owner_id"] == member.id
+                        and self.collaboration.delivery_requests is not None
+                        and self.collaboration.delivery_requests.submitted_handoff(turn.id, member, delivery_task)):
+                    self._finish(turn.id, "completed", reply="The requested review turn submitted this draft.",
+                                 history=checkpoint["history"])
+                    return
             if assignment_owner_yield and self.db.execute(
                 "SELECT 1 FROM events WHERE turn_id = ? AND type = 'turn.delivery_yielded'", (turn.id,),
             ).fetchone():
-                instructions += ("\n\nYou resumed after your own formal task was handled. "
+                instructions += ("\n\nYou resumed after your own formal task or a candidate delivery turn. "
                                  "Check its current state and results before continuing; do not repeat "
                                  "delegation or rebuild an existing candidate.")
+            if candidate:
+                instructions += (
+                    "\n\nHandle the candidate_delivery request in the current input. Read the existing draft and check "
+                    "only the evidence needed to decide if it can be reviewed. Use the specified workspace-relative "
+                    "paths when provided. Publish the current files to reviewer_session_id. Include the Lead if the "
+                    "goal requires access and the Lead is not the publisher. Then call submit_result "
+                    "for task_id and revision, using the successful publication receipts and actual checks. "
+                    "Report unmet criteria in open_issues. If a draft or required evidence is missing, finish with "
+                    "the specific blocker. Keep the reply short and omit private file contents."
+                )
             version_ids = check_scope()
             trimmed_history = False
             if is_fork:
@@ -585,19 +628,23 @@ class Runtime:
                 WHERE turn_id = ? AND type = 'model.completed' ORDER BY seq DESC LIMIT 1
             """, (turn.id,)).fetchone()
             overflowed = bool(previous_decision and previous_decision[0])
-            while phase == "tools" or step < self.max_steps + extra_steps:
+            step_budget = min(self.max_steps, CANDIDATE_STEPS) if candidate else self.max_steps + extra_steps
+            while phase == "tools" or step < step_budget:
                 self._check_generation(turn)
                 check_scope()
                 if phase == "tools":
                     pause = None
                     proposal_confirmed = False
+                    submitted = False
                     for position, call in enumerate(current[-1].get("tool_calls") or []):
                         if fork_message_id is not None:
                             check_scope()
                         result, pause = await self._apply_tool(
                             role, turn, step, position, call, workspace_id, scheduled=scheduled, pause=pause,
+                            candidate=candidate, candidate_submitted=submitted,
                         )
                         name = call["function"]["name"]
+                        submitted |= bool(candidate and name == "submit_result" and result.get("ok"))
                         if name == "close_goal" and self.journal.confirming_goal(turn.id):
                             await self._confirm_goal_close(role, turn)
                             return
@@ -610,6 +657,9 @@ class Runtime:
                     phase = "model"
                     with self.db:
                         self._advance(turn, step, phase, current)
+                        if submitted:
+                            self._write_finish(turn.id, "completed", history=current)
+                            return
                         if pause:
                             self._write_finish(turn.id, pause, history=current)
                             return
@@ -632,10 +682,15 @@ class Runtime:
                 if workspace_id is not None and self.forks is not None:
                     tools.extend(self.forks.tools_for(role))
                     tools.extend(self.fork_messages.tools_for(role))
+                if candidate:
+                    self.collaboration.delivery_requests.context(candidate["message_id"], member)
+                    tools = [tool for tool in tools if tool["function"]["name"] in CANDIDATE_TOOLS]
                 model_identity = getattr(self.model, "identity", {"mode": "injected", "endpoint": None, "model": None})
                 with self.db:
-                    if can_yield and member is not None and self._yield_to_pending_delivery(
-                        turn, member, goal_id, assignment_owner_only=assignment_owner_yield,
+                    active_task = (delivery_task if delivery_task and member
+                                   and delivery_task["terms"]["owner_id"] == member.id else None)
+                    if (can_yield or active_task) and member is not None and self._yield_to_pending_delivery(
+                        turn, member, goal_id, assignment_owner_only=assignment_owner_yield, active_task=active_task,
                     ):
                         return
                     for new_text in self.journal.drain_inputs(turn.id, turn.generation):
@@ -701,7 +756,7 @@ class Runtime:
                     if unresolved:
                         self._write_finish(turn.id, "needs_reconciliation", error="Prior tool outcome needs verification")
                         return
-                    can_continue = (scheduled and not fork_message_id and critical and goal_id and phase == "model"
+                    can_continue = (scheduled and not candidate and not fork_message_id and critical and goal_id and phase == "model"
                                     and self.collaboration.goal_lifecycle.scope_is_open(goal_id))
                     auto = bool(can_continue and not extra_steps)
                     # A formal delivery that displaced a same-session ordinary turn gets
@@ -728,8 +783,10 @@ class Runtime:
                     self._event(turn.id, "model.step_limit", generation=turn.generation, step=step, goal_id=goal_id,
                                 task_id=payload.get("task", {}).get("id"), proposal_id=payload.get("proposal", {}).get("id"),
                                 purpose=purpose, automatic_extensions=automatic,
-                                granted_steps=self.max_steps + extra_steps + (self.max_steps if auto else 0))
-                    self._write_finish(turn.id, "recoverable" if auto else "failed", error="Turn exceeded its model step limit")
+                                granted_steps=step_budget + (self.max_steps if auto else 0))
+                    error = ("Send-for-review request ended before submission. Check the draft and validation evidence."
+                             if candidate else "Turn exceeded its model step limit")
+                    self._write_finish(turn.id, "recoverable" if auto else "failed", error=error)
         except StaleTurn:
             return
         except UnknownToolOutcome as exc:
@@ -746,9 +803,10 @@ class Runtime:
                     self._event(turn.id, "model.failed", generation=turn.generation, error=str(exc),
                                 transient=isinstance(exc, ModelUnavailable))
                     self._write_finish(turn.id, "failed", error=str(exc))
-        except (WorkspaceNotFound, CollaborationInvalid):
+        except (WorkspaceNotFound, CollaborationInvalid, TeamNotFound) as exc:
             if self.journal.current(turn.id, turn.generation):
-                self._finish(turn.id, "interrupted", error="Execution workspace is no longer available")
+                error = str(exc) if candidate else "Execution workspace is no longer available"
+                self._finish(turn.id, "interrupted", error=error)
         except asyncio.CancelledError:
             if self.journal.current(turn.id, turn.generation):
                 self._finish(turn.id, "recoverable" if scheduled or is_fork else "interrupted", error="Server stopped")
@@ -761,7 +819,68 @@ class Runtime:
             if self.active.get(role) is turn:
                 self.active.pop(role)
 
-    async def _apply_tool(self, role, turn, step, position, call, workspace_id, *, scheduled, pause):
+    def _candidate_tool_error(self, turn_id, candidate, role, name, arguments, *, replaying=False):
+        if name not in CANDIDATE_TOOLS:
+            return "This delivery request only permits reading, publishing, and sending the current draft for review."
+        if not (replaying and name == "submit_result"):
+            try:
+                member = self.collaboration.auth.member(role)
+                self.collaboration.delivery_requests.context(candidate["message_id"], member)
+            except (TeamNotFound, CollaborationInvalid) as exc:
+                return str(exc)
+        if name not in {"get_task", "publish_artifact", "submit_result"}:
+            return None
+        try:
+            args = json.loads(arguments)
+        except (TypeError, ValueError):
+            return "Provide a valid argument object."
+        if not isinstance(args, dict):
+            return "Provide a valid argument object."
+        if name == "get_task":
+            if args.get("task_id") != candidate["task_id"] or args.get("revision", candidate["revision"]) != candidate["revision"]:
+                return "Read the task ID and revision from the delivery request."
+            return None
+        paths = set(candidate["paths"])
+        if name == "publish_artifact":
+            if paths and args.get("path") not in candidate["paths"]:
+                return "Publish one of the requested workspace paths."
+            readers = args.get("reader_session_ids")
+            reviewer = candidate["reviewer_session_id"]
+            allowed_readers = {reviewer, candidate.get("lead_session_id")}
+            if (not isinstance(readers, list) or any(not isinstance(reader, str) for reader in readers)
+                    or reviewer not in readers or not set(readers) <= allowed_readers):
+                return "Publish to the designated reviewer and optionally the Lead."
+            if isinstance(args.get("path"), str):
+                previous = self.db.execute("""SELECT json_extract(result, '$.result.version_id') AS version_id
+                    FROM execution_receipts WHERE turn_id=? AND name='publish_artifact' AND state='completed'
+                    AND json_extract(result, '$.ok')=1 AND json_extract(result, '$.result.source_path')=? LIMIT 1""",
+                    (turn_id, args["path"])).fetchone()
+                if previous:
+                    return f"Use version {previous['version_id']} already published for this requested path."
+            return None
+        if args.get("task_id") != candidate["task_id"] or args.get("expected_revision") != candidate["revision"]:
+            return "Use the task ID and revision from the delivery request."
+        versions = args.get("version_ids")
+        if not isinstance(versions, list) or not versions or any(not isinstance(v, str) for v in versions):
+            return "Use the version IDs from successful publications in this delivery request."
+        published = {}
+        for row in self.db.execute("""
+            SELECT result FROM execution_receipts
+            WHERE turn_id = ? AND name = 'publish_artifact' AND state = 'completed'
+            ORDER BY step, position
+        """, (turn_id,)):
+            receipt = json.loads(row["result"])
+            if receipt.get("ok"):
+                version = receipt["result"]
+                published[version["source_path"]] = version["version_id"]
+        if set(versions) - set(published.values()) or (paths and set(versions) != set(published.values())):
+            return "Submit the latest versions of the requested files published in this delivery request."
+        if paths - published.keys():
+            return "Publish each requested file before sending the draft for review."
+        return None
+
+    async def _apply_tool(self, role, turn, step, position, call, workspace_id, *, scheduled, pause,
+                          candidate=None, candidate_submitted=False):
         self._check_generation(turn)
         name = call["function"]["name"]
         call_id = call["id"]
@@ -778,6 +897,11 @@ class Runtime:
                        "Input changed. Decide again before using this tool." if pending and receipt is None else None)
         if workspace_id is not None:
             self.workspace_tools.actor(role)
+        if candidate_submitted:
+            skip_reason = "This delivery request already produced a submission."
+        elif candidate and skip_reason is None:
+            skip_reason = self._candidate_tool_error(turn.id, candidate, role, name, arguments,
+                                                    replaying=receipt is not None)
         with self.db:
             if not self.journal.start_tool(turn.id, turn.generation, step, position, call_id, name, arguments):
                 raise StaleTurn

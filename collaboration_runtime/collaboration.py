@@ -110,6 +110,7 @@ class CollaborationService:
         self.teams = teams
         self.auth = auth
         self.delegation = None
+        self.delivery_requests = None
         self.delegation_tools = None
         self.goal_lifecycle = None
         self.db.executescript("""
@@ -533,6 +534,8 @@ class CollaborationService:
         message = self.get_message(actor.team_id, actor, delivery["message_id"])
         self._add_delivery_answers(delivery)
         payload = {"delivery": delivery, "message": message}
+        if delivery["purpose"] == "task.delivery_requested" and self.delivery_requests is not None:
+            payload["candidate_delivery"] = self.delivery_requests.context(message["id"], actor)
         if message["kind"] == "assignment" and message["sender_id"] == OPERATOR_ID:
             guidance = self.db.execute("""
                 SELECT g.guidance FROM assignment_guidance g JOIN message_deliveries d ON d.message_id = g.message_id
@@ -692,6 +695,12 @@ class CollaborationService:
         visible = []
         for row in rows:
             if row["id"] is None:
+                if self.delivery_requests is not None:
+                    payload = self.delivery_requests.event(team_id, actor, row["type"], row["event_seq"])
+                    if payload is not None:
+                        event_name = "delivery.updated" if row["type"].startswith("task.") else row["type"]
+                        visible.append((event_name, row["event_seq"], {"seq": row["event_seq"], **payload}))
+                        continue
                 if self.delegation is not None:
                     event_type, seq = row["type"], row["event_seq"]
                     payload = self.delegation.event(team_id, actor, event_type, seq)

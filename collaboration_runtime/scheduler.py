@@ -115,6 +115,8 @@ class DeliveryScheduler:
                       AND (s.turn_id IS NULL OR live.id != s.turn_id)
                   )
                 ORDER BY CASE WHEN t.status = 'recoverable' THEN 0
+                              WHEN d.purpose = 'task.delivery_requested' AND (w.queued_through IS NULL
+                                   OR d.event_id <= w.queued_through) THEN 1
                               WHEN w.yielded_kind = 'assignment' AND s.turn_id IS NULL AND d.event_id = w.target_event THEN 1
                               WHEN t.status = 'yielded' THEN 4
                               WHEN m.kind = 'assignment' THEN 1
@@ -133,6 +135,7 @@ class DeliveryScheduler:
                 if session in self.runtime.active:
                     continue
                 fork_message_id = None
+                principal = None
                 try:
                     fork_message_id = self.collaboration.fork_message_for_delivery(delivery)
                     principal = self.collaboration.auth.member(session)
@@ -174,6 +177,8 @@ class DeliveryScheduler:
                                            WHERE event_id = ? AND session_id = ? AND purpose = ?
                                              AND status = 'pending' ''',
                                         (delivery['event_id'], session, delivery['purpose']))
+                        if delivery['purpose'] == 'task.delivery_requested':
+                            self.collaboration.delivery_requests.started(delivery['message_id'], principal.team_id)
                     return session, turn_id, actor.prompt, actor.workspace_id
                 except (TeamNotFound, WorkspaceNotFound, CollaborationForbidden, CollaborationInvalid) as exc:
                     # These failures cannot be resolved by retrying the same work.
@@ -181,6 +186,11 @@ class DeliveryScheduler:
                     self.db.execute('''UPDATE message_deliveries SET status = 'failed'
                                        WHERE event_id = ? AND session_id = ? AND purpose = ?''',
                                     (delivery['event_id'], session, delivery['purpose']))
+                    if delivery['purpose'] == 'task.delivery_requested' and principal is not None:
+                        try:
+                            self.collaboration.delivery_requests.finish(delivery['message_id'], principal, reason=str(exc))
+                        except (TeamNotFound, CollaborationForbidden):
+                            pass
                     if delivery['turn_id'] is not None:
                         if fork_message_id is not None:
                             self.runtime._write_finish(delivery['turn_id'], 'interrupted', error='Fork delivery scope ended')
