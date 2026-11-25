@@ -18,6 +18,8 @@ import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .atomic_move import move_artifact_directory
+
 READ_WORKSPACE_FILE = """\
 import base64
 import os
@@ -372,14 +374,14 @@ class DockerSandbox:
                     "size": len(content)}
         try:
             with tempfile.TemporaryDirectory(dir=artifacts_root) as temp_dir:
-                staged = Path(temp_dir) / "version"
+                staged = Path(temp_dir)
                 exposed = staged / "content"
                 exposed.mkdir(parents=True)
                 (exposed / "artifact").write_bytes(content)
                 (staged / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
-                staged.replace(artifacts_root / artifact_id)
-        except OSError as exc:
-            raise SandboxError(f"cannot store artifact: {exc}") from exc
+                move_artifact_directory(staged, artifacts_root / artifact_id)
+        except OSError:
+            raise SandboxError("cannot store artifact") from None
         return dict(metadata)
 
     def cleanup(self, *workspace_ids: str) -> None:
