@@ -34,16 +34,21 @@ def _delivery_guidance(payload, actor_id=None):
                                'Name one primary deliverable, its owner, reviewer and readers. '
                                'Use output_grants and dependency_ids for work that consumes another task output. '
                                'End this turn when waiting for confirmations.')}
-    if purpose == 'delegation.proposal' and payload.get('proposal_action'):
-        return {'proposal': (f"All parties confirmed the current open version. Call {payload['proposal_action']} "
-                             'with this proposal and exact version; yield the turn when waiting on others.')}
+    if purpose == 'delegation.proposal':
+        if action := payload.get('proposal_action'):
+            return {'proposal': (f'All parties confirmed the current open version. Call {action} '
+                                 'with this proposal and exact version; yield the turn when waiting on others.')}
+        return {'proposal': ('This turn is for deciding on the proposal. If the terms are clear, confirm the exact '
+                             'version and yield unless the receipt asks you to register it. Wait for the formal task '
+                             'delivery to start work.')}
     if purpose in ('task.assigned', 'task.ready', 'task.updated', 'task.returned'):
         task = payload.get('task', {})
         if actor_id is not None and task.get('terms', {}).get('owner_id') == actor_id:
-            return {'delivery': ('Make the smallest checkable version; report missing inputs and continue independent work. '
-                                 'Once a representative acceptance check passes, publish the exact result and evidence '
-                                 'to the required readers, then submit_result for this task and revision. '
-                                 'End this turn when waiting for review.')}
+            return {'delivery': ('Choose a representative acceptance check for the smallest reviewable version. '
+                                 'Report missing inputs and continue independent work. When that check passes, '
+                                 'publish the exact result and evidence to the required readers and call submit_result '
+                                 'for this task and revision before running optional checks or polishing. '
+                                 'Disclose any remaining acceptance gaps and yield to the reviewer.')}
     if purpose == 'task.approved' and payload.get('goal_close_ready'):
         return {'closure': ('Use get_goal.close_preview; if still ready, call close_goal with its confirmation. '
                             'Yield the turn while waiting on others.')}

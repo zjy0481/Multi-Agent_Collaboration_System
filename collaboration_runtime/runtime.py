@@ -95,9 +95,10 @@ DELIVERY_PROMPT = (
     "Agree on the smallest complete deliverable and shared acceptance checks. Start independent work "
     "in parallel when the inputs allow it; state exact input versions, output names, and who reviews. "
     "Confirm a proposal only when its current terms are clear. The proposer registers the task once "
-    "all required parties have confirmed. Acknowledge once when needed; use current task state instead "
-    "of echoing confirmations or status messages. On an assigned, ready, or returned task, produce the deliverable, "
-    "verify it, publish exact versions to the appropriate readers, and submit_result. "
+    "all required parties have confirmed. Do proposal decisions in the proposal delivery and start the work "
+    "in the assigned or ready delivery. Avoid echoing confirmations or status messages. "
+    "On a task you own, once one representative acceptance check passes for a reviewable candidate, "
+    "publish the exact result and evidence to the required readers and call submit_result before optional checks. "
     "For research, run a few focused searches, then read relevant primary sources and start the draft. "
     "Use durable source IDs or cite the actual source and passage you read. Search titles and snippets alone "
     "are leads. Mark claims awaiting evidence, and change approach or report a blocker if further searches "
@@ -108,6 +109,14 @@ DELIVERY_PROMPT = (
     "artifacts or recorded experience. A final reply stays in this session. Use send_message for "
     "a team-visible update when another member or the user needs to act."
 )
+
+
+def _confirmation_yields(proposal, name, result):
+    if not proposal or name != "confirm_proposal" or not result.get("ok"):
+        return False
+    receipt = result["result"]
+    return (receipt.get("proposal_id") == proposal["id"] and receipt.get("version") == proposal["version"]
+            and not receipt.get("proposal_action"))
 
 
 @dataclass
@@ -386,6 +395,7 @@ class Runtime:
             instructions = prompt if prompt is not None else ROLES[role]
             history_scope = None
             goal_id = None
+            proposal = None
             if scheduled:
                 instructions += DELIVERY_PROMPT
                 delivery = self.db.execute("""
@@ -393,7 +403,10 @@ class Runtime:
                     WHERE s.turn_id = ?
                 """, (turn.id,)).fetchone()
                 fork_message_id = self.collaboration.fork_message_for_delivery(delivery)
-                message = json.loads(checkpoint["history"][0]["content"])["message"]
+                payload = json.loads(checkpoint["history"][0]["content"])
+                message = payload["message"]
+                if delivery["purpose"] == "delegation.proposal":
+                    proposal = payload.get("proposal")
                 actor = self.workspace_tools.actor(role)
                 goal_id, history_scope = self.collaboration.goal_scope_for_message(actor.team_id, message["id"])
                 if fork_message_id is not None:
@@ -434,22 +447,32 @@ class Runtime:
                 check_scope()
                 if phase == "tools":
                     pause = None
+                    proposal_confirmed = False
                     for position, call in enumerate(current[-1].get("tool_calls") or []):
                         if fork_message_id is not None:
                             check_scope()
                         result, pause = await self._apply_tool(
                             role, turn, step, position, call, workspace_id, scheduled=scheduled, pause=pause,
                         )
-                        if call["function"]["name"] == "close_goal" and self.journal.confirming_goal(turn.id):
+                        name = call["function"]["name"]
+                        if name == "close_goal" and self.journal.confirming_goal(turn.id):
                             await self._confirm_goal_close(role, turn)
                             return
                         current.append({"role": "tool", "tool_call_id": call["id"],
                                         "content": json.dumps(result, ensure_ascii=False)})
+                        proposal_confirmed |= _confirmation_yields(proposal, name, result)
                     phase = "model"
                     with self.db:
                         self._advance(turn, step, phase, current)
                         if pause:
                             self._write_finish(turn.id, pause, history=current)
+                            return
+                        if proposal_confirmed and not self.journal.checkpoint(turn.id)["pending"]:
+                            reply = "Proposal confirmed. Waiting for the next delivery."
+                            self._event(turn.id, "turn.proposal_yielded", proposal_id=proposal["id"],
+                                        version=proposal["version"])
+                            self._write_finish(turn.id, "completed", reply=reply,
+                                               history=[*current, {"role": "assistant", "content": reply}])
                             return
                     continue
 

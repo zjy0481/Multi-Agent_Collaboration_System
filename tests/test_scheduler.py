@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from collaboration_runtime.api import create_app
 from test_collaboration import OPERATOR, auth, bootstrap, send, setup_team, snapshot
+from test_delegation import action, context, create, key, ok, terms
 
 
 class Sandbox:
@@ -59,6 +60,66 @@ def current_delivery(messages):
             if isinstance(payload, dict) and "delivery" in payload:
                 return payload
     raise AssertionError("Missing structured delivery input")
+
+
+def test_proposal_confirmation_yields_after_receipts_and_task_runs(tmp_path):
+    class Model:
+        def __init__(self):
+            self.confirmation_calls = 0
+
+        async def complete(self, messages, tools):
+            delivery = current_delivery(messages)
+            proposal = delivery.get("proposal", {})
+            if delivery.get("proposal_action") == "assign_task" and messages[-1]["role"] == "user":
+                return tool("assign_task", "assign", {"request_id": key(), "proposal_id": proposal["id"],
+                                                     "expected_version": proposal["version"]})
+            if delivery["delivery"]["purpose"] == "delegation.proposal" and not delivery.get("proposal_action"):
+                self.confirmation_calls += 1
+                wrong_version = tool("confirm_proposal", "stale", {"request_id": key(), "proposal_id": proposal["id"],
+                                                                   "expected_version": proposal["version"] + 1})
+                if messages[-1]["role"] == "user":
+                    return wrong_version
+                if messages[-1].get("tool_call_id") == "stale":
+                    assert not json.loads(messages[-1]["content"])["ok"]
+                    decision = tool("confirm_proposal", "confirm", {"request_id": key(), "proposal_id": proposal["id"],
+                                                                     "expected_version": proposal["version"]})
+                    decision["tool_calls"] += tool("list_participants", "roster", {})["tool_calls"]
+                    return decision
+            return {"role": "assistant", "content": "Finished"}
+
+    model = Model()
+    with TestClient(application(tmp_path, model, Sandbox())) as client:
+        base, lead, others, tokens, goal = context(client)
+        owner, reviewer = others[:2]
+        lead_id, owner_id, reviewer_id = (member["member_id"] for member in (lead, owner, reviewer))
+        record = create(client, base, tokens[lead_id], goal, terms(owner_id, reviewer_id))
+        proposal = record["proposal_id"]
+        # Confirmations from either arrival order can activate the proposer notification.
+        view = ok(client.get(f"/v1/proposals/{proposal}", headers=auth(tokens[lead_id])))
+        if lead_id not in view["confirmation_ids"]:
+            ok(action(client, proposal, tokens[lead_id], "confirm"))
+
+        def completed_turns():
+            db = client.app.state.runtime.db
+            return [dict(row) for row in db.execute("""
+                SELECT t.status,t.history,s.purpose
+                FROM scheduled_turns s JOIN turns t ON t.id=s.turn_id
+                WHERE s.session_id=? AND t.status='completed'
+                ORDER BY t.rowid
+            """, (owner["session_id"],))]
+
+        def task_finished():
+            rows = client.portal.call(completed_turns)
+            return rows if any(row["purpose"] == "task.assigned" for row in rows) else None
+
+        received = wait_until(task_finished)
+        proposal_turn, = [row for row in received if row["purpose"] == "delegation.proposal"]
+        history = json.loads(proposal_turn["history"])
+        tool_messages = [row for row in history if row["role"] == "tool"]
+        assert [row["tool_call_id"] for row in tool_messages] == ["stale", "confirm", "roster"]
+        assert all(json.loads(row["content"])["ok"] for row in tool_messages[1:])
+        assert "Proposal confirmed" in history[-1]["content"]
+        assert model.confirmation_calls == 4  # Two parties each correct the stale attempt.
 
 
 def test_serial_per_session_parallel_across_sessions_and_tool_receipts(tmp_path):
