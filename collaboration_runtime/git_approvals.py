@@ -98,10 +98,13 @@ class GitApprovals:
             CREATE INDEX IF NOT EXISTS git_actions_status ON git_actions(status);
         """)
 
-    @staticmethod
-    def _view(row):
+    def _view(self, row):
         fields = ("action_id", "approval_id", "member_id", "turn_id", "call_id", "status", *BINDING_FIELDS)
-        return {key: row[key] for key in fields}
+        view = {key: row[key] for key in fields}
+        remote = self.executor.remote_repository(row["repository"], row["target_identity"])
+        if remote is not None:
+            view["remote_repository"] = remote
+        return view
 
     def list_pending(self, team_id, actor):
         self.chat.team(team_id, actor)

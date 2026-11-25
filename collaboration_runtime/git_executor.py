@@ -49,13 +49,14 @@ class GitExecutor:
                 env[key] = os.environ[key]
         return env
 
-    def _git(self, args, *, data=None, index=None):
-        env = self._env()
+    def _git(self, args, *, data=None, index=None, env=None, cwd=None):
+        if env is None:
+            env = self._env()
         if index is not None:
             env['GIT_INDEX_FILE'] = str(index)
         try:
             return subprocess.run(['git', '-c', 'core.longpaths=true', *args], input=data, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                  env=env, timeout=20, check=False)
+                                  env=env, cwd=cwd, timeout=20, check=False)
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitActionError('Git command could not be completed') from exc
 
@@ -78,6 +79,9 @@ class GitExecutor:
         target = self._target_path(repository)
         stat = target.stat()
         return hashlib.sha256(f'{target}\0{stat.st_dev}\0{stat.st_ino}'.encode('utf-8')).hexdigest()
+
+    def remote_repository(self, repository, target_identity):
+        return None
 
     def _target(self, repository, ref):
         self._ref(ref)
@@ -119,6 +123,21 @@ class GitExecutor:
                 raise GitActionError('Cannot initialize Git state')
         return local
 
+    def _prepare_parent(self, gitdir, target, ref):
+        # Resolve the operator's target branch without checking out any content.
+        parent_result = self._git(['--git-dir', str(target), 'rev-parse', '--verify', '--quiet', ref])
+        if parent_result.returncode not in (0, 1):
+            raise GitActionError('Cannot inspect target branch')
+        parent = parent_result.stdout.decode('ascii', 'replace').strip() if parent_result.returncode == 0 else ''
+        if parent and not _SHA.fullmatch(parent):
+            raise GitActionError('Invalid target object')
+        if parent:
+            result = self._git([*gitdir, '-c', 'protocol.file.allow=always', 'fetch', '--no-tags',
+                                '--no-write-fetch-head', str(target), ref])
+            if result.returncode:
+                raise GitActionError('Cannot read target history')
+        return parent
+
     def create_commit(self, session_id: str, repository: str, ref: str,
                       files: dict[str, bytes], message: str) -> str:
         target = self._target(repository, ref)
@@ -134,18 +153,7 @@ class GitExecutor:
             raise GitActionError('Invalid file content')
         local = self._local(session_id, repository, ref)
         gitdir = ['--git-dir', str(local)]
-        # Resolve the operator's target branch without checking out any content.
-        parent_result = self._git(['--git-dir', str(target), 'rev-parse', '--verify', '--quiet', ref])
-        if parent_result.returncode not in (0, 1):
-            raise GitActionError('Cannot inspect target branch')
-        parent = parent_result.stdout.decode('ascii', 'replace').strip() if parent_result.returncode == 0 else ''
-        if parent and not _SHA.fullmatch(parent):
-            raise GitActionError('Invalid target object')
-        if parent:
-            result = self._git([*gitdir, '-c', 'protocol.file.allow=always', 'fetch', '--no-tags',
-                                '--no-write-fetch-head', str(target), ref])
-            if result.returncode:
-                raise GitActionError('Cannot read target history')
+        parent = self._prepare_parent(gitdir, target, ref)
         with tempfile.TemporaryDirectory(prefix='index-', dir=self.state_dir) as temp:
             index = Path(temp) / 'index'
             result = self._git([*gitdir, 'read-tree', parent] if parent else [*gitdir, 'read-tree', '--empty'], index=index)
@@ -170,13 +178,9 @@ class GitExecutor:
                 raise GitActionError('Cannot create commit')
             return sha
 
-    def push(self, session_id: str, repository: str, ref: str, sha: str) -> str:
-        target = self._target(repository, ref)
-        if not isinstance(sha, str) or not _SHA.fullmatch(sha):
-            raise GitActionError('Invalid commit SHA')
-        local = self._local(session_id, repository, ref)
+    def _push_status(self, gitdir, target, ref, sha):
         try:
-            result = self._git(['--git-dir', str(local), '-c', 'protocol.file.allow=always',
+            result = self._git([*gitdir, '-c', 'protocol.file.allow=always',
                                 'push', '--no-verify', '--no-follow-tags', '--', str(target), f'{sha}:{ref}'])
         except GitActionError:
             return 'pending_verification'
@@ -186,6 +190,13 @@ class GitExecutor:
         if b'[rejected]' in result.stderr and b'non-fast-forward' in result.stderr:
             return 'failed'
         return 'pending_verification'
+
+    def push(self, session_id: str, repository: str, ref: str, sha: str) -> str:
+        target = self._target(repository, ref)
+        if not isinstance(sha, str) or not _SHA.fullmatch(sha):
+            raise GitActionError('Invalid commit SHA')
+        local = self._local(session_id, repository, ref)
+        return self._push_status(['--git-dir', str(local)], target, ref, sha)
 
     def observe(self, repository: str, ref: str, sha: str) -> str:
         if not isinstance(sha, str) or not _SHA.fullmatch(sha):

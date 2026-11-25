@@ -180,9 +180,27 @@ gh api repos/zjy0481/MACS_testing --jq '.permissions.push'
 git ls-remote --symref https://github.com/zjy0481/MACS_testing.git HEAD
 ```
 
+### GitHub 推送
+
+在运行工作台的宿主账户登录 GitHub CLI，确认该账户有目标仓库的推送权限。工作台通过 `gh` 的 Git 凭据助手读取宿主登录凭据。 [GitHub CLI 登录](https://cli.github.com/manual/gh_auth_login) · [凭据助手](https://cli.github.com/manual/gh_auth_setup-git)
+
+在启动工作台的同一个 PowerShell 选择一种 Git 模式。以下配置为 GitHub 模式，`alias` 是提交工具中的仓库别名，`repository` 是 GitHub 的 `owner/repository`，`ref` 是唯一允许的完整分支 ref。
+
+```powershell
+Remove-Item Env:COLLABORATION_GIT_TARGETS_DIR -ErrorAction SilentlyContinue
+$env:COLLABORATION_GITHUB_TARGET = @{
+    alias = 'MACS_testing'
+    repository = 'zjy0481/MACS_testing'
+    ref = 'refs/heads/test/git-delivery-20261123-001'
+} | ConvertTo-Json -Compress
+.\.venv\Scripts\python.exe -m uvicorn collaboration_runtime.api:app --host 127.0.0.1 --port 8000 --workers 1
+```
+
+请将示例 ref 换成这一轮获准使用的分支。工作台待审批卡片显示实际 GitHub 仓库、完整 ref 和提交 SHA。批准后由 worker 进行普通推送并读回目标 ref。匹配获准 SHA 时，Git 动作状态为 `succeeded`。认证或分支保护明确拒绝推送时，状态为 `failed`。无法确认时，状态为 `pending_verification`，重启后会重新读取该 ref。切回本地裸仓库模式时，移除 `COLLABORATION_GITHUB_TARGET` 并设置 `COLLABORATION_GIT_TARGETS_DIR`。
+
 ## 启动工作台与真实模型联调
 
-启动 Docker Desktop 和需要的 SearXNG 容器。手动 Git 联调时，在同一个 PowerShell 先设置上节的 Git 目标目录。每次使用单进程访问一个状态目录。默认目录为 `.tmp/runtime`，需要分隔测试和演示数据时可用 `COLLABORATION_STATE_DIR` 指定独立目录。 [工作台启动说明](../README.md#启动)
+启动 Docker Desktop 和需要的 SearXNG 容器。手动 Git 联调时，在启动工作台的 PowerShell 配置所选 Git 模式的目标。每次使用单进程访问一个状态目录。默认目录为 `.tmp/runtime`，需要分隔测试和演示数据时可用 `COLLABORATION_STATE_DIR` 指定独立目录。 [工作台启动说明](../README.md#启动)
 
 ```powershell
 $env:COLLABORATION_STATE_DIR = '.tmp/runtime-test'
@@ -214,4 +232,3 @@ Remove-Item Env:RUN_LIVE_COURSE_SEARCH_TESTS
 ## 已知问题与验收状态
 
 - **Starlette 测试客户端弃用提示。** `fastapi.testclient.TestClient` 使用 `httpx` 时会出现 `StarletteDeprecationWarning`。本机测试仍能通过，可继续推进。启用将警告视为错误的测试设置时，这条警告可能影响测试收集。后续可以单独评估 `TestClient` 迁移到 `httpx2`，并复跑相关用例。 [Starlette TestClient](https://starlette.dev/testclient/)
-- **工作台审批后推送至 GitHub 待 T016。** 工作台已通过本地裸仓库的提交、审批和推送联调。通过 Git CLI 向统一测试仓库的新分支推送也已验证，远端 ref 与提交 SHA 一致。工作台当前的 Git 执行器仅接收本地裸仓库，审批后向 GitHub 推送的端到端验收随 T016 推进。 [T016 验收要求](plans/agent-collaboration/revisions/r0003/tickets/T016.md)

@@ -31,6 +31,7 @@ from .forks import ForkHandoffInput, ForkInput, ForkService
 from .task_results import ReviewResultInput, SubmitResultInput
 from .git_approvals import ApprovalInput, GitApprovals
 from .git_executor import GitExecutor
+from .github_executor import GitHubExecutor
 from .goal_lifecycle import (
     AcceptanceUpdateInput,
     ActivateGoalInput,
@@ -212,9 +213,15 @@ def create_app(model=None, sandbox=None, *, state_dir: Path | None = None, boots
             app.state.goal_lifecycle = goal_lifecycle
             app.state.evaluation_reports = EvaluationReports(collaboration)
             target_directory = git_targets_dir or os.environ.get("COLLABORATION_GIT_TARGETS_DIR")
+            github_target = os.environ.get("COLLABORATION_GITHUB_TARGET")
             executor = git_executor
-            if executor is None and target_directory:
-                executor = GitExecutor(state / "git", Path(target_directory))
+            if executor is None:
+                if github_target and target_directory:
+                    raise ValueError("Configure only one of COLLABORATION_GITHUB_TARGET and COLLABORATION_GIT_TARGETS_DIR")
+                if github_target:
+                    executor = GitHubExecutor.from_config(state / "git", github_target)
+                elif target_directory:
+                    executor = GitExecutor(state / "git", Path(target_directory))
             runtime.git_approvals = GitApprovals(runtime, collaboration, workspace, executor) if executor else None
             if runtime.git_approvals is not None:
                 approval_worker = asyncio.create_task(runtime.git_approvals.run())

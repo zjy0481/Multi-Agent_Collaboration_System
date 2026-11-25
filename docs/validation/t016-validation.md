@@ -20,8 +20,16 @@
 
 ## 验证范围
 
-隔离验收使用基线的调度器、Docker 工作区、提交工具、审批 API、SQLite 持久领取和审批 worker。确定性测试模型产生工具调用。固定测试仓库和 ref 的 GitHub HTTPS 传输由验收脚本通过 `create_app(git_executor=...)` 注入。平台常规启动入口支持的 Git 目标是本地裸仓库。 [执行器](../../collaboration_runtime/git_executor.py) · [测试仓库配置](../environment-setup.md)
+隔离验收使用基线的调度器、Docker 工作区、提交工具、审批 API、SQLite 持久领取和审批 worker。确定性测试模型产生工具调用。首次验收通过 `create_app(git_executor=...)` 注入固定仓库和 ref 的 GitHub HTTPS 传输。正式启动入口的后续实测见下节。 [执行器](../../collaboration_runtime/git_executor.py) · [测试仓库配置](../environment-setup.md)
 
 Windows 宿主上，T011 的 5 项回归通过，覆盖拒绝、参数不匹配、审批重放及未知结果复核。命令沙箱运行同组用例时，有 3 项推送相关失败。SSE 返回 `snapshot_required`，本轮从隔离 SQLite 只读导出待批和结果事件。 [Git 审批测试](../../tests/test_git_approvals.py) · [执行器测试](../../tests/test_git_executor.py)
 
 本机原始证据位于 `.tmp/t016-github-delivery-20261125/`，其中 `human-approval-receipt.json`、`status-current.json`、`github-rest-current.json` 分别保存真人决定、动作及工具回执、独立远端读取。工作台进程已退出，监听端口已释放，验收容器数为 0，保留 4 个隔离工作卷供取证。
+
+## 正式启动入口复验
+
+2026 年 11 月 25 日，使用 `collaboration_runtime.api:app` 启动独立工作台。通过 `COLLABORATION_GITHUB_TARGET` 配置一个 GitHub 仓库及完整 ref，由宿主已登录的 `gh` 提供凭据。试验使用确定性模型申请推送一个合成文件。在 Chrome 点击一次「批准此提交」，审批 API 返回 `approved`，worker 执行推送并核对远端，原执行会话收到 `succeeded`。 [正式配置](../environment-setup.md#github-推送)
+
+- 目标 `zjy0481/MACS_testing` 的 `refs/heads/test/t016-workbench-20261125` 在批准前不存在。GitHub REST 独立确认该 ref 指向获准提交。 [实测提交](https://github.com/zjy0481/MACS_testing/commit/6361abf87fbfc10ae3d147577dc556acb4750068)
+- 真实 GitHub 实测覆盖首次创建分支。后续快进、拒绝审批、参数不匹配和远端 SHA 不符由本地可重复测试覆盖。实测后的修订区分了明确拒绝和推送结果未知，两种状态以及重启后的只读核对均已通过本地回归。 [GitHub 交付测试](../../tests/test_github_delivery.py)
+- 原始浏览器批准、动作和远端证据位于本机 `.tmp/t016-workbench-github-20261125/`。工作台和验收浏览器均已退出。
